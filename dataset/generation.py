@@ -221,7 +221,7 @@ class DatasetExplorer:
 
 
 # Генерація датасету
-generator = SignalDatasetGenerator(num_samples=100, sample_rate=1000, duration=1, freq_range=(10, 100))
+generator = SignalDatasetGenerator(num_samples=5000, sample_rate=2144, duration=1, freq_range=(10, 100))
 clean_signals, gaussian_dataset, non_gaussian_dataset = generator.generate_dataset()
 
 # Робота з датасетом
