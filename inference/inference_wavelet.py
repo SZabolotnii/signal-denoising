@@ -4,7 +4,7 @@ from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, S
 import matplotlib.pyplot as plt
 
 # ---- Configuration ----
-dataset_type = "gaussian"  # or "non_gaussian"
+dataset_type = "non_gaussian"  # or "non_gaussian"
 random_state = 42
 wavelet = 'db4'
 level = 4
@@ -13,6 +13,11 @@ sample_index = 0  # Change to visualize another test sample
 # ---- Load dataset and split identically to ML models ----
 noisy = np.load(f"../dataset/{dataset_type}_signals.npy")
 clean = np.load("../dataset/clean_signals.npy")
+
+best_params = {
+    "gaussian": {'wavelet': 'db6', 'level': 3, 'thresh_mode': 'soft', 'per_level': False, 'ext_mode': 'symmetric'},
+    "non_gaussian": {'wavelet': 'db4', 'level': 4, 'thresh_mode': 'soft', 'per_level': False,
+                     'ext_mode': 'periodization'}}
 
 signal_len = noisy.shape[1]
 assert noisy.shape == clean.shape
@@ -35,7 +40,7 @@ X_test = noisy[test_indices]
 y_test = clean[test_indices]
 
 # ---- Denoising and metrics ----
-wavelet_denoiser = WaveletDenoising(wavelet=wavelet, level=level)
+wavelet_denoiser = WaveletDenoising(**best_params[dataset_type])
 
 all_metrics = {
     "MSE": [],
