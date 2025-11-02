@@ -234,7 +234,7 @@ class ResNetAutoencoderTrainer:
 
 
 if __name__ == "__main__":
-    dataset_type = "gaussian"  # or "non_gaussian"
+    dataset_type = "non_gaussian"  # or "non_gaussian"
     random_state = 42
     batch_size = 32
     epochs = 50

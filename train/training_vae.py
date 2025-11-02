@@ -24,18 +24,12 @@ class VAETrainer:
         self.lr = learning_rate
         self.signal_len = signal_len
         self.fs = fs
-        self.nperseg = nperseg
-        self.noverlap = nperseg // 2
+        self.nperseg = 128
+        self.noverlap = 96
         self.pad = self.nperseg // 2
         self.random_state = random_state
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        wandb.init(project=wandb_project, name=f"VAE_{dataset_type}", config={
-            "dataset": dataset_type,
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "lr": learning_rate
-        })
 
         run_name = f"VAE_{dataset_type}_{uuid.uuid4().hex[:8]}"
         wandb.init(project=wandb_project, name=run_name, config={
@@ -65,8 +59,8 @@ class VAETrainer:
         return torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
 
     def load_data(self):
-        noisy = np.load(f"dataset/{self.dataset_type}_signals.npy")
-        clean = np.load("dataset/clean_signals.npy")
+        noisy = np.load(f"../dataset/{self.dataset_type}_signals.npy")
+        clean = np.load("../dataset/clean_signals.npy")
 
         assert noisy.shape[
                    1] == self.signal_len, f"Noisy signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
@@ -159,7 +153,7 @@ class VAETrainer:
                 best_val_loss = val_loss
                 best_weights = self.model.state_dict()
 
-        torch.save(best_weights, f"SpectrogramVAE_{self.dataset_type}_best.pth")
+        torch.save(best_weights, f"../weights/SpectrogramVAE_{self.dataset_type}_best.pth")
         print("✅ Best model saved.")
         self.model.load_state_dict(best_weights)
 
@@ -257,13 +251,13 @@ class VAETrainer:
 
 if __name__ == "__main__":
     input_dim = 1
-    dataset_type = "gaussian"  # or "non_gaussian"
+    dataset_type = "non_gaussian"  # or "non_gaussian"
     random_state = 42
     batch_size = 32
     epochs = 50
     learning_rate = 1e-4
     wandb_project = "signal-denoising"
-    signal_len = 1000
+    signal_len = 2144
 
     trainer = VAETrainer(
         dataset_type=dataset_type,
@@ -272,6 +266,6 @@ if __name__ == "__main__":
         learning_rate=learning_rate,
         random_state=random_state,
         wandb_project=wandb_project,
-        signal_len=1000
+        signal_len=signal_len
     )
     trainer.train()

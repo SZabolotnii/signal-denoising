@@ -39,8 +39,8 @@ class Trainer:
         })
 
     def load_data(self):
-        noisy_signals = np.load(f"dataset/{self.dataset_type}_signals.npy")
-        clean_signals = np.load("dataset/clean_signals.npy")
+        noisy_signals = np.load(f"../dataset/{self.dataset_type}_signals.npy")
+        clean_signals = np.load("../dataset/clean_signals.npy")
 
         X = torch.tensor(noisy_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
         y = torch.tensor(clean_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
@@ -105,12 +105,12 @@ class Trainer:
                 best_weights = self.model.state_dict()
 
             print(f"Epoch {epoch:02d} | "
+                  f"Train Loss: {train_metrics['train_loss']:.4f} | "
                   f"Train MSE: {train_metrics['MSE']:.4f} | "
-                  f"Val MSE: {val_metrics['MSE']:.4f} | "
-                  f"Val SNR: {val_metrics['SNR']:.2f} dB")
+                  f"Val MSE: {val_metrics['MSE']:.4f}")
 
         # Save best model
-        model_path = f"weights/{self.model_name}_{self.dataset_type}_best.pth"
+        model_path = f"../weights/{self.model_name}_{self.dataset_type}_best.pth"
         torch.save(best_weights, model_path)
         print(f"✅ Best model saved to {model_path}")
         self.model.load_state_dict(best_weights)
@@ -171,8 +171,7 @@ class Trainer:
 
 if __name__ == "__main__":
     input_dim = 1
-    sequence_length = 1000  # or whatever your dataset uses
-    dataset_type = "gaussian"  # or "non_gaussian"
+    dataset_type = "non_gaussian"  # or "non_gaussian"
     random_state = 42
     batch_size = 32
     epochs = 50

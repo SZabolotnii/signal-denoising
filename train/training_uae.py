@@ -129,7 +129,7 @@ class UnetAutoencoderTrainer:
             }, step=epoch)
 
             print(f"Epoch {epoch:02d} | Train Loss: {total_loss / len(self.train_loader):.6f} | "
-                  f"Val Loss: {val_loss:.6f} | Val SNR: {val_metrics['MSE']:.2f}")
+                  f"Val Loss: {val_loss:.6f} | Val MSE: {val_metrics['MSE']:.2f}")
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -233,7 +233,7 @@ if __name__ == "__main__":
     signal_len = 2144
 
     trainer = UnetAutoencoderTrainer(
-        dataset_type="gaussian",
+        dataset_type="non_gaussian",
         batch_size=batch_size,
         epochs=epochs,
         learning_rate=learning_rate,
