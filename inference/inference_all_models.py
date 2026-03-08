@@ -23,8 +23,8 @@ wavelet_type = 'db8'
 wavelet_level = None
 
 # ----- Завантаження даних -----
-noisy = np.load(f"../dataset/{dataset_type}_signals.npy")
-clean = np.load("../dataset/clean_signals.npy")
+noisy = np.load(f"../data_generation/{dataset_type}_signals.npy")
+clean = np.load("../data_generation/clean_signals.npy")
 assert noisy.shape == clean.shape
 
 # Спліт даних

@@ -14,8 +14,8 @@ model_weights_path = "../weights/TimeSeriesTransformer_gaussian_best.pth"
 sample_index = 0  # CHANGE THIS TO CHOOSE TEST ITEM
 
 # --- Load Data (identical to trainer) ---
-noisy = np.load(f"../dataset/{dataset_type}_signals.npy")
-clean = np.load("../dataset/clean_signals.npy")
+noisy = np.load(f"../data_generation/{dataset_type}_signals.npy")
+clean = np.load("../data_generation/clean_signals.npy")
 
 assert noisy.shape[1] == signal_len and clean.shape[1] == signal_len, "Signal length mismatch!"
 

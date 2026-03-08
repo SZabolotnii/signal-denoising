@@ -31,7 +31,7 @@ class Trainer:
         run_name = f"{model_name}_{dataset_type}_{uuid.uuid4().hex[:8]}"
         wandb.init(project=wandb_project, name=run_name, config={
             "model": model_name,
-            "dataset": dataset_type,
+            "datasets": dataset_type,
             "epochs": epochs,
             "batch_size": batch_size,
             "learning_rate": learning_rate,
@@ -39,8 +39,8 @@ class Trainer:
         })
 
     def load_data(self):
-        noisy_signals = np.load(f"../dataset/{self.dataset_type}_signals.npy")
-        clean_signals = np.load("../dataset/clean_signals.npy")
+        noisy_signals = np.load(f"../data_generation/{self.dataset_type}_signals.npy")
+        clean_signals = np.load("../data_generation/clean_signals.npy")
 
         X = torch.tensor(noisy_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
         y = torch.tensor(clean_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
