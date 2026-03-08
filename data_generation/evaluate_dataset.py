@@ -570,12 +570,33 @@ def main():
     # ── Load signals ──────────────────────────────────────────────────────────
     train_dir = os.path.join(dataset_dir, "train")
     src_dir   = train_dir if os.path.isdir(train_dir) else dataset_dir
-    fname     = os.path.join(src_dir, f"{args.noise_type}_signals.npy")
-    if not os.path.isfile(fname):
-        raise FileNotFoundError(f"File not found: {fname}")
 
-    print(f"\nLoading  {fname}")
-    signals = np.load(fname)
+    if args.noise_type == "non_gaussian":
+        # Prefer pre-saved pure noise; fall back to residual (noisy - clean)
+        noise_only_path = os.path.join(src_dir, "non_gaussian_noise_only.npy")
+        noisy_path      = os.path.join(src_dir, "non_gaussian_signals.npy")
+        clean_path      = os.path.join(src_dir, "clean_signals.npy")
+
+        if os.path.isfile(noise_only_path):
+            print(f"\nLoading  {noise_only_path}")
+            signals = np.load(noise_only_path)
+            print(f"  Pure noise (pre-saved)")
+        elif os.path.isfile(noisy_path) and os.path.isfile(clean_path):
+            print(f"\nLoading  {noisy_path}  (residual mode)")
+            signals = np.load(noisy_path) - np.load(clean_path)
+            print(f"  Pure noise computed as: non_gaussian_signals - clean_signals")
+        else:
+            raise FileNotFoundError(
+                f"Neither non_gaussian_noise_only.npy nor "
+                f"non_gaussian_signals.npy found in {src_dir}"
+            )
+    else:
+        fname = os.path.join(src_dir, f"{args.noise_type}_signals.npy")
+        if not os.path.isfile(fname):
+            raise FileNotFoundError(f"File not found: {fname}")
+        print(f"\nLoading  {fname}")
+        signals = np.load(fname)
+
     if args.n_signals:
         signals = signals[: args.n_signals]
     print(f"  Shape: {signals.shape}")

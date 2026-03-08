@@ -386,9 +386,9 @@ class SignalDatasetGenerator:
         std = self._noise_std_for_snr(signal, snr_db)
         return signal + np.random.normal(0.0, std, self._signal_len)
 
-    def _add_non_gaussian_noise(self, signal: np.ndarray, snr_db: float) -> np.ndarray:
+    def _generate_non_gaussian_noise(self, signal: np.ndarray, snr_db: float) -> np.ndarray:
         """
-        Non-Gaussian interference scaled to target SNR.
+        Generate non-Gaussian noise scaled to target SNR. Returns pure noise array.
 
         Available types (set via non_gaussian_noise_types):
           - "impulse"               : sparse impulse noise (EM spikes)
@@ -454,7 +454,11 @@ class SignalDatasetGenerator:
         if current_rms > 1e-9:
             noise = noise * (target_rms / current_rms)
 
-        return signal + noise
+        return noise
+
+    def _add_non_gaussian_noise(self, signal: np.ndarray, snr_db: float) -> np.ndarray:
+        """Signal + non-Gaussian noise at target SNR."""
+        return signal + self._generate_non_gaussian_noise(signal, snr_db)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Modulation dispatch
@@ -477,32 +481,36 @@ class SignalDatasetGenerator:
     # Dataset generation
     # ──────────────────────────────────────────────────────────────────────────
 
-    def generate_dataset(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def generate_dataset(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Training datasets with variable SNR (uniform from snr_range).
 
         Returns
         -------
-        clean             : (N, block_size)
-        gaussian_noisy    : (N, block_size)
-        non_gaussian_noisy: (N, block_size)
-        snr_values        : (N,)
+        clean                  : (N, block_size)
+        gaussian_noisy         : (N, block_size)
+        non_gaussian_noisy     : (N, block_size)  signal + noise
+        non_gaussian_noise_only: (N, block_size)  pure noise component
+        snr_values             : (N,)
         """
-        clean_list, gauss_list, non_gauss_list, snr_list = [], [], [], []
+        clean_list, gauss_list, non_gauss_list, noise_list, snr_list = [], [], [], [], []
 
         for _ in tqdm(range(self.num_samples), desc="Generating train datasets", unit="sig"):
             signal = self._generate_signal()
             snr_db = random.uniform(*self.snr_range)
+            noise  = self._generate_non_gaussian_noise(signal, snr_db)
 
             clean_list.append(signal)
             gauss_list.append(self._add_gaussian_noise(signal, snr_db))
-            non_gauss_list.append(self._add_non_gaussian_noise(signal, snr_db))
+            non_gauss_list.append(signal + noise)
+            noise_list.append(noise)
             snr_list.append(snr_db)
 
         return (
             np.array(clean_list),
             np.array(gauss_list),
             np.array(non_gauss_list),
+            np.array(noise_list),
             np.array(snr_list),
         )
 
@@ -516,7 +524,7 @@ class SignalDatasetGenerator:
 
         Returns
         -------
-        dict { snr_db -> {"clean": ndarray, "gaussian": ndarray, "non_gaussian": ndarray} }
+        dict { snr_db -> {"clean", "gaussian", "non_gaussian", "non_gaussian_noise_only"} }
         """
         if samples_per_snr is None:
             samples_per_snr = self.num_samples
@@ -524,18 +532,21 @@ class SignalDatasetGenerator:
         result: dict[float, dict[str, np.ndarray]] = {}
 
         for snr_db in tqdm(snr_values, desc="Generating test datasets", unit="SNR"):
-            clean_list, gauss_list, non_gauss_list = [], [], []
+            clean_list, gauss_list, non_gauss_list, noise_list = [], [], [], []
             for _ in tqdm(range(samples_per_snr), desc=f"  SNR={snr_db:+.0f} dB",
                           unit="sig", leave=False):
                 signal = self._generate_signal()
+                noise = self._generate_non_gaussian_noise(signal, snr_db)
                 clean_list.append(signal)
                 gauss_list.append(self._add_gaussian_noise(signal, snr_db))
-                non_gauss_list.append(self._add_non_gaussian_noise(signal, snr_db))
+                non_gauss_list.append(signal + noise)
+                noise_list.append(noise)
 
             result[float(snr_db)] = {
-                "clean":        np.array(clean_list),
-                "gaussian":     np.array(gauss_list),
-                "non_gaussian": np.array(non_gauss_list),
+                "clean":                    np.array(clean_list),
+                "gaussian":                 np.array(gauss_list),
+                "non_gaussian":             np.array(non_gauss_list),
+                "non_gaussian_noise_only":  np.array(noise_list),
             }
 
         return result
@@ -819,15 +830,17 @@ if __name__ == "__main__":
     # Training datasets
     print("[ 1 / 2 ]  Training datasets...")
     t0 = time.time()
-    clean, gaussian, non_gaussian, snr_arr = gen.generate_dataset()
+    clean, gaussian, non_gaussian, noise_only, snr_arr = gen.generate_dataset()
     print(f"           Done in {time.time() - t0:.1f} s  "
           f"| SNR: [{snr_arr.min():.1f}, {snr_arr.max():.1f}] dB\n")
 
-    np.save(os.path.join(TRAIN_DIR, "clean_signals.npy"),        clean.astype(np.float32))
-    np.save(os.path.join(TRAIN_DIR, "gaussian_signals.npy"),     gaussian.astype(np.float32))
-    np.save(os.path.join(TRAIN_DIR, "non_gaussian_signals.npy"), non_gaussian.astype(np.float32))
-    np.save(os.path.join(TRAIN_DIR, "snr_values.npy"),           snr_arr.astype(np.float32))
-    for fname in ["clean_signals.npy", "gaussian_signals.npy", "non_gaussian_signals.npy"]:
+    np.save(os.path.join(TRAIN_DIR, "clean_signals.npy"),               clean.astype(np.float32))
+    np.save(os.path.join(TRAIN_DIR, "gaussian_signals.npy"),            gaussian.astype(np.float32))
+    np.save(os.path.join(TRAIN_DIR, "non_gaussian_signals.npy"),        non_gaussian.astype(np.float32))
+    np.save(os.path.join(TRAIN_DIR, "non_gaussian_noise_only.npy"),     noise_only.astype(np.float32))
+    np.save(os.path.join(TRAIN_DIR, "snr_values.npy"),                  snr_arr.astype(np.float32))
+    for fname in ["clean_signals.npy", "gaussian_signals.npy", "non_gaussian_signals.npy",
+                  "non_gaussian_noise_only.npy"]:
         mb = os.path.getsize(os.path.join(TRAIN_DIR, fname)) / 1024 ** 2
         print(f"  {fname:<30s}  {mb:6.1f} MB")
 
