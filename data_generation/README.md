@@ -124,7 +124,8 @@ SDR-приймач видає комплексний I/Q-сигнал (in-phase 
 
 - **Ваги** w_k(t): K траєкторій OU -> softmax, Σw_k = 1
 - **Дисперсії** σ_k(t): K траєкторій OU у log-просторі -> exp > 0;
-  різні log-зміщення задають компоненти від слабкого фонового шуму до сильних викидів
+  log-зміщення рівномірно розподілені від -0.5 до +0.5 (σ ≈ 0.6...1.6),
+  що дозволяє охоплювати як лептокуртичні (важкі хвости), так і платикуртичні (від'ємний ексцес) режими
 - **Середні** μ_k(t): K-1 вільних траєкторій OU; остання визначається з умови
   нульового загального середнього: `μ_K(t) = -Σ_{k<K} w_k(t)*μ_k(t) / w_K(t)`
 
@@ -194,15 +195,17 @@ data_generation/datasets/
 └── deep_space_polygauss_nonstationary_bpsk_bs256_n50000_6d07aecc/
     ├── dataset_config.json    <- всі параметри генерації + uid + timestamp
     ├── train/
-    │   ├── clean_signals.npy           (50 000 x 256)  float32
-    │   ├── gaussian_signals.npy        (50 000 x 256)  float32
-    │   ├── non_gaussian_signals.npy    (50 000 x 256)  float32
-    │   └── snr_values.npy              (50 000,)        float32
+    │   ├── clean_signals.npy                (50 000 x 256)  float32
+    │   ├── gaussian_signals.npy             (50 000 x 256)  float32
+    │   ├── non_gaussian_signals.npy         (50 000 x 256)  float32
+    │   ├── non_gaussian_noise_only.npy      (50 000 x 256)  float32
+    │   └── snr_values.npy                   (50 000,)        float32
     └── test/
-        ├── test_m20dB_clean.npy        (500 x 256)
-        ├── test_m20dB_gaussian.npy     (500 x 256)
-        ├── test_m20dB_non_gaussian.npy (500 x 256)
-        └── ...  <- 7 SNR-точок x 3 типи = 21 файл
+        ├── test_m20dB_clean.npy                      (500 x 256)
+        ├── test_m20dB_gaussian.npy                   (500 x 256)
+        ├── test_m20dB_non_gaussian.npy               (500 x 256)
+        ├── test_m20dB_non_gaussian_noise_only.npy    (500 x 256)
+        └── ...  <- 7 SNR-точок x 4 типи = 28 файлів
 ```
 
 > `data_generation/datasets/` додана до `.gitignore`.

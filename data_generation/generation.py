@@ -354,7 +354,7 @@ class SignalDatasetGenerator:
         weights = exp_l / exp_l.sum(axis=0)
 
         log_var = self._ou_trajectories(n, K, theta=5.0, sigma=2.0)
-        offsets = np.linspace(-0.5, 1.0, K)
+        offsets = np.linspace(-0.5, 0.5, K)
         stds    = np.exp(log_var + offsets[:, np.newaxis])
 
         means         = np.zeros((K, n))
@@ -730,6 +730,10 @@ if __name__ == "__main__":
         NOISE_TYPES = ["polygauss", "impulse"]
         MIX_MODE    = "fixed"
         noise_tag   = "polygauss_impulse"
+    elif args.polygauss:
+        NOISE_TYPES = ["polygauss"]
+        MIX_MODE    = "fixed"
+        noise_tag   = "polygauss"
     elif args.polygauss_nonstationary:
         NOISE_TYPES = ["polygauss_nonstationary"]
         MIX_MODE    = "fixed"
@@ -738,7 +742,7 @@ if __name__ == "__main__":
         NOISE_TYPES = ["impulse", "pink", "red", "polygauss"]
         MIX_MODE    = "random"
         noise_tag   = "all_noise"
-    else:  # --polygauss_nonstationary is default
+    else:  # default: polygauss_nonstationary
         NOISE_TYPES = ["polygauss_nonstationary"]
         MIX_MODE    = "fixed"
         noise_tag   = "polygauss_nonstationary"
