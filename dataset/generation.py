@@ -35,7 +35,7 @@ class SignalDatasetGenerator:
     }
 
     # Допустимі типи негауссового шуму
-    NON_GAUSSIAN_NOISE_TYPES = ("impulse", "pink", "red", "polygauss")
+    NON_GAUSSIAN_NOISE_TYPES = ("impulse", "pink", "red", "polygauss", "polygauss_nonstationary")
 
     def __init__(
         self,
@@ -56,7 +56,8 @@ class SignalDatasetGenerator:
         scenario                 : "fpv_telemetry" або "deep_space"
         snr_range                : (snr_min_dB, snr_max_dB) — перекриває дефолт сценарію
         non_gaussian_noise_types : список типів негауссового шуму для використання.
-                                   Доступні: "impulse", "pink", "red", "polygauss".
+                                   Доступні: "impulse", "pink", "red", "polygauss",
+                                             "polygauss_nonstationary".
                                    За замовчуванням: ["polygauss"].
         non_gaussian_mix_mode    : "fixed"  — використовувати всі вказані типи одночасно;
                                    "random" — випадково вибрати підмножину (хоча б один).
@@ -255,6 +256,88 @@ class SignalDatasetGenerator:
     # Шум
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _ou_trajectories(self, n: int, K: int, theta: float, sigma: float) -> np.ndarray:
+        """
+        K незалежних траєкторій процесу Орнштейна-Уленбека довжиною n відліків.
+
+        Дискретна рекурсія: x[t] = α·x[t-1] + β·ε[t]
+          α = 1 − θ·dt  (коефіцієнт загасання за крок)
+          β = σ·√dt     (амплітуда шуму)
+
+        Реалізовано через scipy.signal.lfilter — O(n·K), без Python-циклу.
+        Час кореляції OU: τ = 1/θ секунд.
+
+        Returns
+        -------
+        ndarray (K, n)
+        """
+        from scipy.signal import lfilter
+        dt    = 1.0 / self.sample_rate
+        alpha = max(0.0, 1.0 - theta * dt)
+        beta  = sigma * np.sqrt(dt)
+        eps   = np.random.randn(K, n)
+        # IIR: b=[beta], a=[1, -alpha]  →  y[t] = alpha·y[t-1] + beta·eps[t]
+        return lfilter([beta], [1.0, -alpha], eps, axis=1)
+
+    def _polygauss_nonstationary_component(self, n: int, K: int = 4) -> np.ndarray:
+        """
+        Нестаціонарний полігауссовий шум (polygauss_nonstationary).
+
+        Суміш K гаусіан, параметри якої плавно дрейфують у часі через
+        процеси Орнштейна-Уленбека (OU):
+
+        Крок 1 — Траєкторії параметрів
+          Ваги w_k(t):  K траєкторій OU → softmax → w_k(t) ∈ (0,1), Σw_k=1
+          Дисперсії:    K траєкторій OU у log-просторі → exp → σ_k(t) > 0;
+                        різні log-зміщення на компоненту (фоновий шум ↔ викиди)
+          Середні:      K-1 вільних траєкторій OU + обмеження нульового середнього:
+                        μ_K(t) = −Σ_{k<K} w_k(t)·μ_k(t) / w_K(t)
+
+        Крок 2 — Поточкова генерація (векторизована)
+          Для кожного t вибрати активну компоненту k(t) методом рулетки
+          (накопичених ваг) та згенерувати відлік N(μ_{k(t)}, σ²_{k(t)}).
+
+        Parameters
+        ----------
+        K : кількість компонент (≥ 3)
+        """
+        assert K >= 3, "K must be >= 3 for polygauss_nonstationary"
+
+        # ── Крок 1. Траєкторії параметрів ────────────────────────────────────
+        # Ваги: softmax(OU) — τ ≈ 0.125 с (повільний дрейф відносно 0.25 с вікна)
+        logits  = self._ou_trajectories(n, K, theta=8.0, sigma=3.0)   # (K, n)
+        logits -= logits.max(axis=0)                                    # стабільний softmax
+        exp_l   = np.exp(logits)
+        weights = exp_l / exp_l.sum(axis=0)                            # (K, n)
+
+        # Дисперсії: exp(OU) > 0; log-зміщення розподіляють компоненти від
+        # слабкого теплового шуму (−0.5) до сильних викидів (+1.0)
+        log_var = self._ou_trajectories(n, K, theta=5.0, sigma=2.0)   # (K, n)
+        offsets = np.linspace(-0.5, 1.0, K)
+        stds    = np.exp(log_var + offsets[:, np.newaxis])             # (K, n), > 0
+
+        # Середні: K-1 вільних + μ_K забезпечує нульове загальне середнє
+        means         = np.zeros((K, n))
+        means[:K - 1] = self._ou_trajectories(n, K - 1, theta=10.0, sigma=2.0)
+        means[K - 1]  = (
+            -np.sum(weights[:K - 1] * means[:K - 1], axis=0)
+            / (weights[K - 1] + 1e-9)
+        )
+
+        # ── Крок 2. Векторизована генерація відліків ──────────────────────────
+        # Метод рулетки: k(t) = перший індекс де cumsum ≥ u(t)
+        cum_w = np.cumsum(weights, axis=0)                             # (K, n)
+        u     = np.random.uniform(0.0, 1.0, n)
+        k_idx = (cum_w < u[np.newaxis, :]).sum(axis=0).clip(0, K - 1) # (n,)
+
+        # Fancy indexing: selected_means[t] = means[k_idx[t], t]
+        t_idx            = np.arange(n)
+        selected_means   = means[k_idx, t_idx]
+        selected_stds    = stds[k_idx, t_idx]
+        noise            = selected_means + selected_stds * np.random.randn(n)
+
+        return noise
+
     def _noise_std_for_snr(self, signal: np.ndarray, snr_db: float) -> float:
         """Обчислює std гауссового шуму для заданого SNR (дБ)."""
         signal_power = np.mean(signal ** 2)
@@ -273,10 +356,12 @@ class SignalDatasetGenerator:
         Негауссові завади, масштабовані до заданого SNR.
 
         Доступні типи (задаються через non_gaussian_noise_types):
-          - "impulse"   : імпульсний шум (ESC-перешкоди, EM-спалахи) — широкосмуговий
-          - "pink"      : рожевий шум (1/f) — cumsum(white), нахил спектру ≈ -1
-          - "red"       : червоний / броунівський шум (1/f²) — cumsum²(white), нахил ≈ -2
-          - "polygauss" : суміш гауссіан — рівномірний спектр, негауссовий розподіл
+          - "impulse"                  : імпульсний шум (ESC-перешкоди, EM-спалахи)
+          - "pink"                     : рожевий шум (1/f), нахил спектру ≈ -1
+          - "red"                      : червоний шум (1/f²), нахил ≈ -2
+          - "polygauss"                : стаціонарна суміш гауссіан, рівномірний спектр
+          - "polygauss_nonstationary"  : суміш гауссіан з параметрами що дрейфують
+                                         через процеси Орнштейна-Уленбека (K ≥ 3)
 
         Режими (non_gaussian_mix_mode):
           - "fixed"  : використовувати всі вказані типи одночасно
@@ -319,6 +404,10 @@ class SignalDatasetGenerator:
                     (np.random.normal(means[c], stds[c]) for c in choices),
                     dtype=float, count=n,
                 )
+
+            elif noise_type == "polygauss_nonstationary":
+                K = random.randint(3, 5)
+                component = self._polygauss_nonstationary_component(n, K=K)
 
             noise += component
 
@@ -548,6 +637,10 @@ if __name__ == "__main__":
         help="Non-Gaussian noise: polygaussian + impulse (fixed combination)",
     )
     noise_group.add_argument(
+        "--polygauss_nonstationary", action="store_true",
+        help="Non-Gaussian noise: non-stationary poly-Gaussian via Ornstein-Uhlenbeck (K∈[3,5])",
+    )
+    noise_group.add_argument(
         "--all_noise", action="store_true",
         help="Non-Gaussian noise: impulse + pink + red + polygauss (random subset per sample)",
     )
@@ -566,6 +659,10 @@ if __name__ == "__main__":
         NOISE_TYPES = ["polygauss", "impulse"]
         MIX_MODE    = "fixed"
         noise_tag   = "polygauss_impulse"
+    elif args.polygauss_nonstationary:
+        NOISE_TYPES = ["polygauss_nonstationary"]
+        MIX_MODE    = "fixed"
+        noise_tag   = "polygauss_nonstationary"
     elif args.all_noise:
         NOISE_TYPES = ["impulse", "pink", "red", "polygauss"]
         MIX_MODE    = "random"

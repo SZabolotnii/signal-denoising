@@ -46,6 +46,9 @@ python dataset/generation.py --deep_space --polygauss
 python dataset/generation.py --fpv --polygauss
 python dataset/generation.py --fpv --polygauss_impulse
 
+# Нестаціонарний полігаус
+python dataset/generation.py --deep_space --polygauss_nonstationary
+
 # Змінити кількість прикладів
 python dataset/generation.py --deep_space --polygauss --num_train 5000 --samples_per_snr 200
 ```
@@ -171,10 +174,19 @@ SignalDatasetGenerator(..., non_gaussian_noise_types=["impulse", "pink", "red", 
 
 | Тип | Спектр | Фізичний прототип |
 |---|---|---|
-| `polygauss` | рівний (білий, ~0 dB/dec) | суміш гауссіан — негауссовий канальний шум |
+| `polygauss` | рівний (~0 dB/dec) | стаціонарна суміш гауссіан, негауссовий канальний шум |
+| `polygauss_nonstationary` | рівний, нестаціонарний | суміш гауссіан з параметрами що дрейфують через OU-процеси |
 | `impulse` | рівний (широкосмуговий) | спалахи ESC-регуляторів, EM-імпульси |
 | `pink` | 1/f (−1 dB/dec) | флікер-шум підсилювачів |
 | `red` | 1/f² (−2 dB/dec) | броунівський шум, низькочастотні завади |
+
+**`polygauss_nonstationary` — алгоритм:**
+
+Суміш K ∈ [3, 5] гауссіан, параметри якої плавно дрейфують у часі:
+- **Ваги** w_k(t): K траєкторій Орнштейна-Уленбека (τ ≈ 0.125 с) → softmax → Σw_k = 1
+- **Дисперсії** σ_k(t): K траєкторій OU у log-просторі → exp, різні зміщення від слабкого фону до сильних викидів
+- **Середні** μ_k(t): K−1 вільних траєкторій OU; остання μ_K(t) обчислюється так, щоб загальне середнє шуму залишалось нульовим: `μ_K(t) = −Σ_{k<K} w_k(t)·μ_k(t) / w_K(t)`
+- **Генерація**: для кожного t обирається компонента методом рулетки, відлік береться з N(μ_{k(t)}, σ²_{k(t)}); повністю векторизовано через fancy indexing
 
 ### 5. Тестовий датасет для ROC-кривих
 
