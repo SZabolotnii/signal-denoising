@@ -10,9 +10,9 @@ wavelet = 'db4'
 level = 4
 sample_index = 0  # Change to visualize another test sample
 
-# ---- Load dataset and split identically to ML models ----
-noisy = np.load(f"../dataset/{dataset_type}_signals.npy")
-clean = np.load("../dataset/clean_signals.npy")
+# ---- Load datasets and split identically to ML models ----
+noisy = np.load(f"../data_generation/{dataset_type}_signals.npy")
+clean = np.load("../data_generation/clean_signals.npy")
 
 best_params = {
     "gaussian": {'wavelet': 'db6', 'level': 3, 'thresh_mode': 'soft', 'per_level': False, 'ext_mode': 'symmetric'},

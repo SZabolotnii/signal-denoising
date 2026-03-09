@@ -92,8 +92,8 @@ def grid_search_wavelet(noisy: np.ndarray,
 # Приклад використання
 if __name__ == "__main__":
     # завантаження вашого датасету
-    noisy = np.load("../dataset/non_gaussian_signals.npy")  # або non_gaussian_signals.npy
-    clean = np.load("../dataset/clean_signals.npy")
+    noisy = np.load("../data_generation/non_gaussian_signals.npy")  # або non_gaussian_signals.npy
+    clean = np.load("../data_generation/clean_signals.npy")
     assert noisy.shape == clean.shape
 
     best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean)

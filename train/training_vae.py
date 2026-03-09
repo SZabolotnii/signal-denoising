@@ -34,7 +34,7 @@ class VAETrainer:
         run_name = f"VAE_{dataset_type}_{uuid.uuid4().hex[:8]}"
         wandb.init(project=wandb_project, name=run_name, config={
             "model": "VAE",
-            "dataset": dataset_type,
+            "datasets": dataset_type,
             "epochs": epochs,
             "batch_size": batch_size,
             "learning_rate": learning_rate,
@@ -59,8 +59,8 @@ class VAETrainer:
         return torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
 
     def load_data(self):
-        noisy = np.load(f"../dataset/{self.dataset_type}_signals.npy")
-        clean = np.load("../dataset/clean_signals.npy")
+        noisy = np.load(f"../data_generation/{self.dataset_type}_signals.npy")
+        clean = np.load("../data_generation/clean_signals.npy")
 
         assert noisy.shape[
                    1] == self.signal_len, f"Noisy signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
