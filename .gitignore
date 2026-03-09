@@ -2,3 +2,7 @@
 wandb
 .env
 data_generation/datasets/
+.venv
+spectro_dataset
+weights
+__pycache__
