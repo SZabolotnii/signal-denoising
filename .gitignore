@@ -1,3 +1,9 @@
 .idea
 wandb
 .env
+# DSGE experiment artifacts
+weights/
+experiments/*.log
+experiments/*.png
+__pycache__/
+.venv/
