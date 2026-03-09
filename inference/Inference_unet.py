@@ -3,7 +3,7 @@ import torch
 import matplotlib.pyplot as plt
 from scipy.signal import stft, istft
 
-from models.autoencoder_unet_v3 import UnetAutoencoder
+from models.autoencoder_unet import UnetAutoencoder
 
 # -----------------------------
 # Конфіг (узгоджено з тренуванням)
