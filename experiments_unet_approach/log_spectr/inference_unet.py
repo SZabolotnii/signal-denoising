@@ -23,7 +23,7 @@ USE_CPU     = False
 # =========================
 # IMPORTS
 # =========================
-from models.autoencoder_unet_v2 import UnetAutoencoder
+from models.autoencoder_unet import UnetAutoencoder
 from metrics import (
     MeanSquaredError,
     MeanAbsoluteError,

@@ -47,7 +47,7 @@ except Exception:
     WANDB_OK = False
 
 # ----- модель (твоя версія з SE, даунсемплом по F і T) -----
-from models.autoencoder_unet_v2 import UnetAutoencoder
+from models.autoencoder_unet import UnetAutoencoder
 
 
 # ------------------------
