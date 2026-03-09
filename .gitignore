@@ -1,3 +1,6 @@
 .idea
 wandb
 .env
+data_generation/datasets/
+.venv
+spectro_dataset
