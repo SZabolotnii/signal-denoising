@@ -38,7 +38,7 @@ $$\tilde{x}(t) = x(t) + n(t)$$
 
 **Задача:** побудувати оцінку $\hat{x}(t)$, що мінімізує MSE:
 
-$$\text{MSE} = E\left\{ \| x - \hat{x} \|^2 \right\} \to \min$$
+$$\text{MSE} = E\left\lbrace \| x - \hat{x} \|^2 \right\rbrace \to \min$$
 
 ### 2.2 Розклад у просторі Кунченка (DSGE)
 
@@ -59,15 +59,15 @@ $$\mathbf{F} \cdot \mathbf{K} = \mathbf{B}$$
 
 де матриця кореляцій **F** розміру $S \times S$:
 
-$$F_{ij} = E\left\{ [\varphi_i(\tilde{x}) - \Psi_i][\varphi_j(\tilde{x}) - \Psi_j] \right\}$$
+$$F_{ij} = E\left\lbrace [\varphi_i(\tilde{x}) - \Psi_i][\varphi_j(\tilde{x}) - \Psi_j] \right\rbrace$$
 
 та вектор взаємних кореляцій **B** розміру $S$:
 
-$$B_i = E\left\{ [x - \Psi_0][\varphi_i(\tilde{x}) - \Psi_i] \right\}$$
+$$B_i = E\left\lbrace [x - \Psi_0][\varphi_i(\tilde{x}) - \Psi_i] \right\rbrace$$
 
 з позначеннями:
-- $\Psi_0 = E\{x\}$ — середнє чистого сигналу
-- $\Psi_i = E\{\varphi_i(\tilde{x})\}$ — середнє i-ї базисної функції
+- $\Psi_0 = E\lbrace x \rbrace$ — середнє чистого сигналу
+- $\Psi_i = E\lbrace \varphi_i(\tilde{x}) \rbrace$ — середнє i-ї базисної функції
 - $k_0 = \Psi_0 - \sum_i k_i \Psi_i$ — вільний коефіцієнт
 
 ### 2.4 Регуляризація Тихонова
@@ -97,7 +97,7 @@ $$|\hat{Z}| = M \odot |\text{STFT}(\tilde{x})|$$
 
 Реконструкція:
 
-$$\hat{x}(t) = \text{ISTFT}\left( |\hat{Z}| \cdot e^{j \angle \text{STFT}(\tilde{x})} \right)$$
+$$\hat{x}(t) = \text{ISTFT}\left( |\hat{Z}| \cdot e^{j \, \angle \text{STFT}(\tilde{x})} \right)$$
 
 Ratio Mask має критичну перевагу перед прямим прогнозуванням амплітуди: при нульовій масці $M=0$ loss буде дорівнювати $\text{MSE}(0, |Z_{clean}|)$, що значно більше нуля. Це **математично виключає колапс у тривіальний розв'язок** $\hat{x} = 0$.
 
@@ -203,7 +203,7 @@ $$\varphi_i^{norm} = \varphi_i \cdot \frac{\max(|\text{STFT}(\tilde{x})|)}{\max(
 
 Для non-Gaussian шуму n(t) з ненульовим ексцесом (kurtosis κ > 3):
 
-$$E\{(\tilde{x})^4\} = E\{(x+n)^4\} = E\{x^4\} + 4E\{x^3\}E\{n\} + 6E\{x^2\}E\{n^2\} + \ldots$$
+$$E\lbrace (\tilde{x})^4 \rbrace = E\lbrace (x+n)^4 \rbrace = E\lbrace x^4 \rbrace + 4E\lbrace x^3 \rbrace E\lbrace n \rbrace + 6E\lbrace x^2 \rbrace E\lbrace n^2 \rbrace + \ldots$$
 
 Четвертий момент містить інформацію про **кумулянти вищих порядків** шуму, які не доступні лінійним методам. Поліноміальний базис здатний "витягти" цю інформацію з зашумлених спостережень.
 
@@ -224,7 +224,7 @@ $$E\{(\tilde{x})^4\} = E\{(x+n)^4\} = E\{x^4\} + 4E\{x^3\}E\{n\} + 6E\{x^2\}E\{n
 
 $$\sin(f \cdot (x + n)) \approx \sin(f \cdot n) \quad \text{(шум домінує)}$$
 
-Оскільки sin(fn) для великого n є квазівипадковим, **кореляція** $E\{x \cdot \sin(f\tilde{x})\}$ → 0 при сильному шумі. Базис "втрачає зв'язок" з корисним сигналом.
+Оскільки sin(fn) для великого n є квазівипадковим, **кореляція** $E\lbrace x \cdot \sin(f\tilde{x}) \rbrace$ → 0 при сильному шумі. Базис "втрачає зв'язок" з корисним сигналом.
 
 **Слабке місце:** При SNR = -10.45 dB, де σ(noise) = 2.36, аргумент sin(3·2.36) = sin(7.08) багаторазово "обертається", розмиваючи кореляцію.
 
@@ -255,7 +255,7 @@ $$\psi(x) = \frac{d}{dx}\varphi(x)$$
 
 Для non-Gaussian шуму з "важкими хвостами" (heavy-tailed distribution) це означає, що:
 
-$$\text{Var}\{\varphi(\tilde{x})\} \ll \text{Var}\{\tilde{x}\}$$
+$$\text{Var}\lbrace \varphi(\tilde{x}) \rbrace \ll \text{Var}\lbrace \tilde{x} \rbrace$$
 
 тобто дисперсія трансформованого сигналу значно менша за дисперсію оригіналу. Це напряму покращує **SNR базисних каналів**, що подаються на вхід U-Net.
 
