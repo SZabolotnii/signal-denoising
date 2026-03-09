@@ -1,119 +1,42 @@
+# compare_models_with_new_unet.py
+# -*- coding: utf-8 -*-
+
+import os
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from scipy.signal import stft, istft
-from models.autoencoder_unet_v2 import UnetAutoencoder
+
+# ======= МОДЕЛІ =======
+from models.autoencoder_unet_v2 import UnetAutoencoder   # НОВА U-Net
 from models.time_series_trasformer import TimeSeriesTransformer
 from models.wavelet import WaveletDenoising
 
+# ======= МЕТРИКИ =======
+from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+
 # ----- Конфігурація -----
-dataset_type = "gaussian"  # "gaussian" або "non_gaussian"
+dataset_type = "non_gaussian"  # "gaussian" або "non_gaussian"
 random_state = 42
 sample_index = 0
 signal_len = 2144
-fs = 1024
-nperseg = 128
-noverlap = 96
-pad = nperseg // 2
 
-# шляхи до збережених ваг моделей
-unet_weights_path = f"../weights/UnetAutoencoder_{dataset_type}_best.pth"
+# шляхи
+RAW_DIR       = "../dataset"
+SPECTRO_ROOT  = f"../spectro_dataset/{dataset_type}"
+unet_weights_path        = f"../weights/UnetAutoencoder_{dataset_type}_best.pth"
 transformer_weights_path = f"../weights/TimeSeriesTransformer_{dataset_type}_best.pth"
-wavelet_type = 'db8'
-wavelet_level = None
 
-# ----- Завантаження даних -----
-noisy = np.load(f"../dataset/{dataset_type}_signals.npy")
-clean = np.load("../dataset/clean_signals.npy")
-assert noisy.shape == clean.shape
-
-# Спліт даних
-N = len(noisy)
-indices = np.arange(N)
-np.random.seed(random_state)
-np.random.shuffle(indices)
-test_indices = indices[int(0.7 * N):]
-
-X_test = noisy[test_indices]
-y_test = clean[test_indices]
-
-test_noisy = X_test[sample_index]
-test_clean = y_test[sample_index]
-
-# ----- Wavelet Denoising -----
+# wavelet best params
 best_params = {
-    "gaussian": {'wavelet': 'db6', 'level': 3, 'thresh_mode': 'soft', 'per_level': False, 'ext_mode': 'symmetric'},
-    "non_gaussian": {'wavelet': 'db4', 'level': 4, 'thresh_mode': 'soft', 'per_level': False,
-                     'ext_mode': 'periodization'}}
+    "gaussian":      {'wavelet': 'db6', 'level': 3, 'thresh_mode': 'soft', 'per_level': False, 'ext_mode': 'symmetric'},
+    "non_gaussian":  {'wavelet': 'db4', 'level': 4, 'thresh_mode': 'soft', 'per_level': False, 'ext_mode': 'periodization'},
+}
 
-wavelet_denoiser = WaveletDenoising(**best_params[dataset_type])
-wavelet_denoised = wavelet_denoiser.denoise(test_noisy)
-wavelet_denoised = wavelet_denoised[:signal_len]
-
-# ----- Transformer Denoising -----
-transformer = TimeSeriesTransformer(input_dim=1)
-transformer.load_state_dict(torch.load(transformer_weights_path, map_location='cpu'))
-transformer.eval()
-
-with torch.no_grad():
-    transformer_input = torch.tensor(test_noisy, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
-    transformer_output = transformer(transformer_input).squeeze().numpy()
-
-transformer_output = transformer_output[:signal_len]
-
-# ----- UNet Autoencoder Denoising -----
-# Підготовка вхідних даних для UNet
-padded = np.pad(test_noisy, pad_width=pad, mode='reflect')
-_, _, Zxx = stft(padded, fs=fs, nperseg=nperseg, noverlap=noverlap, boundary=None)
-mag = np.abs(Zxx)
-phase = np.angle(Zxx)
-input_shape = mag.shape
-
-unet = UnetAutoencoder(input_shape=input_shape)
-unet.load_state_dict(torch.load(unet_weights_path, map_location='cpu'))
-unet.eval()
-
-with torch.no_grad():
-    input_mag_tensor = torch.tensor(mag, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    output_mag = unet(input_mag_tensor).squeeze().numpy()
-
-Zxx_denoised = output_mag * np.exp(1j * phase)
-_, unet_output = istft(Zxx_denoised, fs=fs, nperseg=nperseg, noverlap=noverlap, input_onesided=True)
-# Явно обрізаємо або доповнюємо результат до потрібної довжини
-if len(unet_output) < signal_len:
-    unet_output = np.pad(unet_output, (0, signal_len - len(unet_output)))
-else:
-    unet_output = unet_output[:signal_len]
-
-# unet_output = unet_output[pad:pad + signal_len]
-# unet_output = unet_output[:signal_len]
-
-# ----- Візуалізація усіх моделей -----
-time_axis = np.arange(signal_len) / fs
-
-plt.figure(figsize=(15, 6))
-plt.plot(time_axis, test_clean, label='а) Оригінальний сигнал', linewidth=2, color='black')
-plt.plot(time_axis, test_noisy, label='b) Зашумлений сигнал', alpha=0.5, color='gray')
-plt.plot(time_axis, wavelet_denoised, label='c) Відновлення Wavelet', linestyle='-.', linewidth=2)
-plt.plot(time_axis, transformer_output, label='d) Відновлення Transformer', linestyle='--', linewidth=2)
-plt.plot(time_axis, unet_output, label='e) Відновлення UAE', linestyle='-', linewidth=2)
-
-plt.xlabel("Час (с)")
-plt.ylabel("Амплітуда")
-plt.title(f"Порівняння знешумлення сигналу ({dataset_type} завади)")
-plt.xlim([0.15, 0.25])
-plt.ylim([-2, 2])
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-plt.show()
-
-
-from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
-
-# ======= УТИЛІТИ ДЛЯ ОЦІНКИ =======
+# =========================
+# Допоміжні утиліти
+# =========================
 def crop_or_pad(x, target_len):
-    """Приводить сигнал x до довжини target_len (обрізання/доповнення нулями)."""
     if len(x) < target_len:
         return np.pad(x, (0, target_len - len(x)))
     elif len(x) > target_len:
@@ -121,96 +44,151 @@ def crop_or_pad(x, target_len):
     return x
 
 def compute_all_metrics(clean_arr, pred_arr):
-    """Обчислює всі метрики з вашого класу metrics.* для 1D масивів однакової довжини."""
     return {
-        "MSE": MeanSquaredError.calculate(clean_arr, pred_arr),
-        "MAE": MeanAbsoluteError.calculate(clean_arr, pred_arr),
+        "MSE":  MeanSquaredError.calculate(clean_arr, pred_arr),
+        "MAE":  MeanAbsoluteError.calculate(clean_arr, pred_arr),
         "RMSE": RootMeanSquaredError.calculate(clean_arr, pred_arr),
-        "SNR": SignalToNoiseRatio.calculate(clean_arr, pred_arr),
+        "SNR":  SignalToNoiseRatio.calculate(clean_arr, pred_arr),
     }
 
-# Допоміжні обчислювачі для кожної моделі (щоб перевикористати в циклі)
+def istft_unpad(mag, phase, fs, nperseg, noverlap, window, pad):
+    Z = mag * np.exp(1j * phase)
+    _, x_pad = istft(Z, fs=fs, nperseg=nperseg, noverlap=noverlap,
+                     window=window, input_onesided=True, boundary=None)
+    return x_pad[pad:-pad] if pad > 0 and x_pad.size >= 2 * pad else x_pad
+
+# =========================
+# Завантаження даних та мета
+# =========================
+# сирі дані (часова область)
+noisy_all = np.load(os.path.join(RAW_DIR, f"{dataset_type}_signals.npy"))
+clean_all = np.load(os.path.join(RAW_DIR, "clean_signals.npy"))
+assert noisy_all.shape == clean_all.shape
+
+# мета для STFT/спліту/нормалізації
+import json
+with open(os.path.join(SPECTRO_ROOT, "meta.json"), "r") as f:
+    meta = json.load(f)
+fs       = int(meta["fs"])
+nperseg  = int(meta["nperseg"])
+noverlap = int(meta["noverlap"])
+window   = meta.get("window", "hann")
+pad      = int(meta.get("pad", nperseg // 2))
+test_idx = np.array(meta["split_indices"]["test_idx"], dtype=np.int64)
+
+# статистики нормалізації для U-Net (лог-амплітуда train_X)
+train_X = np.load(os.path.join(SPECTRO_ROOT, "train_X.npy"))  # log1p|N|
+train_mean = float(train_X.mean())
+train_std  = float(train_X.std() + 1e-8)
+
+# формуємо тестові набори з сирих даних за тим самим сплітом
+X_test = noisy_all[test_idx]
+y_test = clean_all[test_idx]
+
+# =========================
+# Ініціалізація моделей
+# =========================
+# Wavelet
+wavelet_denoiser = WaveletDenoising(**best_params[dataset_type])
+
+# Transformer
+transformer = TimeSeriesTransformer(input_dim=1)
+transformer.load_state_dict(torch.load(transformer_weights_path, map_location='cpu'))
+transformer.eval()
+
+# U-Net (нова)
+# Щоб побудувати правильний розмір входу (F, T'), робимо STFT одного прикладу
+padded_probe = np.pad(X_test[0], pad_width=pad, mode='reflect')
+_, _, Z_probe = stft(padded_probe, fs=fs, nperseg=nperseg, noverlap=noverlap, boundary=None)
+F, Tprime = Z_probe.shape
+unet = UnetAutoencoder(input_shape=(F, Tprime))
+unet.load_state_dict(torch.load(unet_weights_path, map_state_dict := {'map_location':'cpu'} if isinstance(unet_weights_path, str) else {}))
+unet.eval()
+
+# =========================
+# Обгортки-денойзери
+# =========================
 def wavelet_denoise_signal(x_noisy):
-    x_den = wavelet_denoiser.denoise(x_noisy)
-    return crop_or_pad(x_den, signal_len)
+    return crop_or_pad(wavelet_denoiser.denoise(x_noisy), signal_len)
 
 @torch.no_grad()
 def transformer_denoise_signal(x_noisy):
-    x_in = torch.tensor(x_noisy, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)  # [1, T, 1]
-    x_out = transformer(x_in).squeeze().cpu().numpy()                             # [T]
+    x_in = torch.tensor(x_noisy, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)  # [1,T,1]
+    x_out = transformer(x_in).squeeze().cpu().numpy()
     return crop_or_pad(x_out, signal_len)
 
 @torch.no_grad()
 def unet_denoise_signal(x_noisy):
-    # STFT з віддзеркальним паддінгом (такими ж параметрами як вище)
-    padded = np.pad(x_noisy, pad_width=pad, mode='reflect')
-    _, _, Zxx = stft(padded, fs=fs, nperseg=nperseg, noverlap=noverlap, boundary=None)
-    mag = np.abs(Zxx)
-    phase = np.angle(Zxx)
+    # STFT з reflect-паддінгом
+    x_pad = np.pad(x_noisy, pad, mode='reflect')
+    _, _, Z = stft(x_pad, fs=fs, nperseg=nperseg, noverlap=noverlap, boundary=None, window=window)
+    mag = np.abs(Z)              # |N| (лінійно)
+    phase = np.angle(Z)
 
-    # Прогін через U-Net по амплітуді
-    inp = torch.tensor(mag, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # [1,1,F,T]
-    out_mag = unet(inp).squeeze().cpu().numpy()                             # [F,T]
+    # інпут для моделі: X_in = zscore(log1p(|N|))
+    X_log = np.log1p(mag).astype(np.float32)
+    X_in  = (X_log - train_mean) / train_std
+    X_in_t = torch.from_numpy(X_in).unsqueeze(0).unsqueeze(0)  # [1,1,F,T']
 
-    # ISTFT + вирівнювання довжини
-    Zxx_denoised = out_mag * np.exp(1j * phase)
-    _, rec = istft(Zxx_denoised, fs=fs, nperseg=nperseg, noverlap=noverlap, input_onesided=True)
-    # зняти паддінг (повернутись до оригінальної довжини) та підрівняти
-    rec = rec[pad:pad + signal_len]
-    return crop_or_pad(rec, signal_len)
+    pred_mask = unet(X_in_t).squeeze().cpu().numpy()           # [F,T'], σ∈[0,1]
 
-# ======= ОБЧИСЛЕННЯ МЕТРИК НА ВСЬОМУ ТЕСТ-НАБОРІ =======
-wavelet_metrics = {"MSE": [], "MAE": [], "RMSE": [], "SNR": []}
-transformer_metrics = {"MSE": [], "MAE": [], "RMSE": [], "SNR": []}
-unet_metrics = {"MSE": [], "MAE": [], "RMSE": [], "SNR": []}
+    den_mag = pred_mask * mag                                  # |Ĉ| = M·|N|
+    x_den = istft_unpad(den_mag, phase, fs, nperseg, noverlap, window, pad).astype(np.float32)
+
+    return crop_or_pad(x_den, signal_len)
+
+# =========================
+# Візуалізація одного прикладу
+# =========================
+sample_noisy = X_test[sample_index]
+sample_clean = y_test[sample_index]
+
+pred_w = wavelet_denoise_signal(sample_noisy)
+pred_t = transformer_denoise_signal(sample_noisy)
+pred_u = unet_denoise_signal(sample_noisy)
+
+time_axis = np.arange(signal_len) / fs
+plt.figure(figsize=(15, 6))
+plt.plot(time_axis, sample_clean, label='a) Оригінальний', linewidth=2, color='black')
+plt.plot(time_axis, sample_noisy, label='b) Зашумлений', alpha=0.5, color='gray')
+plt.plot(time_axis, pred_w, label='c) Wavelet', linestyle='-.', linewidth=2)
+plt.plot(time_axis, pred_t, label='d) Transformer', linestyle='--', linewidth=2)
+plt.plot(time_axis, pred_u, label='e) U-Net (new)', linestyle='-', linewidth=2)
+plt.xlabel("Час (с)"); plt.ylabel("Амплітуда")
+plt.title(f"Порівняння знешумлення сигналу ({dataset_type})")
+plt.xlim([0.15, 0.25]); plt.ylim([-2, 2])
+plt.grid(True); plt.legend(); plt.tight_layout(); plt.show()
+
+# =========================
+# Метрики на всьому test
+# =========================
+wavelet_metrics    = {"MSE": [], "MAE": [], "RMSE": [], "SNR": []}
+transformer_metrics= {"MSE": [], "MAE": [], "RMSE": [], "SNR": []}
+unet_metrics       = {"MSE": [], "MAE": [], "RMSE": [], "SNR": []}
 
 for i in range(len(X_test)):
     x_noisy = X_test[i]
     x_clean = y_test[i]
 
     # Wavelet
-    pred_w = wavelet_denoise_signal(x_noisy)
-    m_w = compute_all_metrics(x_clean, pred_w)
-    for k, v in m_w.items():
-        wavelet_metrics[k].append(v)
+    m = compute_all_metrics(x_clean, wavelet_denoise_signal(x_noisy))
+    for k,v in m.items(): wavelet_metrics[k].append(v)
 
     # Transformer
-    pred_t = transformer_denoise_signal(x_noisy)
-    m_t = compute_all_metrics(x_clean, pred_t)
-    for k, v in m_t.items():
-        transformer_metrics[k].append(v)
+    m = compute_all_metrics(x_clean, transformer_denoise_signal(x_noisy))
+    for k,v in m.items(): transformer_metrics[k].append(v)
 
-    # U-Net
-    pred_u = unet_denoise_signal(x_noisy)
-    m_u = compute_all_metrics(x_clean, pred_u)
-    for k, v in m_u.items():
-        unet_metrics[k].append(v)
+    # U-Net (NEW PATH)
+    m = compute_all_metrics(x_clean, unet_denoise_signal(x_noisy))
+    for k,v in m.items(): unet_metrics[k].append(v)
 
-# Середні значення по тестовому набору
-def mean_dict(d):
-    return {k: float(np.mean(v)) for k, v in d.items()}
+def mean_dict(d): return {k: float(np.mean(v)) for k,v in d.items()}
 
-wavelet_mean = mean_dict(wavelet_metrics)
+wavelet_mean     = mean_dict(wavelet_metrics)
 transformer_mean = mean_dict(transformer_metrics)
-unet_mean = mean_dict(unet_metrics)
+unet_mean        = mean_dict(unet_metrics)
 
-print("\n=== Test-set metrics (mean over test set) ===")
-print(f"Wavelet     | MSE={wavelet_mean['MSE']:.6f}  MAE={wavelet_mean['MAE']:.6f}  "
-      f"RMSE={wavelet_mean['RMSE']:.6f}  SNR={wavelet_mean['SNR']:.2f} dB")
-print(f"Transformer | MSE={transformer_mean['MSE']:.6f}  MAE={transformer_mean['MAE']:.6f}  "
-      f"RMSE={transformer_mean['RMSE']:.6f}  SNR={transformer_mean['SNR']:.2f} dB")
-print(f"U-Net (UAE) | MSE={unet_mean['MSE']:.6f}  MAE={unet_mean['MAE']:.6f}  "
-      f"RMSE={unet_mean['RMSE']:.6f}  SNR={unet_mean['SNR']:.2f} dB")
-
-# (необовʼязково) невелика табличка в консолі:
-try:
-    import pandas as pd
-    df = pd.DataFrame([
-        {"Model": "Wavelet", **wavelet_mean},
-        {"Model": "Transformer", **transformer_mean},
-        {"Model": "U-Net (UAE)", **unet_mean},
-    ])
-    print("\nSummary table:\n", df.to_string(index=False))
-except Exception:
-    pass
-
+print("\n=== Test-set metrics (mean over TEST split) ===")
+print(f"Wavelet     | MSE={wavelet_mean['MSE']:.6f}  MAE={wavelet_mean['MAE']:.6f}  RMSE={wavelet_mean['RMSE']:.6f}  SNR={wavelet_mean['SNR']:.2f} dB")
+print(f"Transformer | MSE={transformer_mean['MSE']:.6f}  MAE={transformer_mean['MAE']:.6f}  RMSE={transformer_mean['RMSE']:.6f}  SNR={transformer_mean['SNR']:.2f} dB")
+print(f"U-Net (new) | MSE={unet_mean['MSE']:.6f}  MAE={unet_mean['MAE']:.6f}  RMSE={unet_mean['RMSE']:.6f}  SNR={unet_mean['SNR']:.2f} dB")
