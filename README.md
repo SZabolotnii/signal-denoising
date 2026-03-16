@@ -65,11 +65,14 @@ signal-denoising/
 │   ├── generation.py          <- генератор синтетичних датасетів
 │   ├── evaluate_dataset.py    <- оцінка якості датасету через аналіз кумулянтів
 │   ├── datasets/              <- згенеровані датасети (gitignored)
-│   │   └── deep_space_polygauss_nonstationary_bpsk_bs256_n50000_6d07aecc/
+│   │   └── deep_space_polygauss_nonstationary_bpsk_bs256_n50000_<uid>/
 │   │       ├── dataset_config.json
-│   │       ├── train/
-│   │       └── test/
+│   │       ├── train/         <- clean_signals.npy, gaussian_signals.npy, non_gaussian_signals.npy
+│   │       ├── test/          <- per-SNR test files (test_m10dB_*.npy, ...)
+│   │       └── weights/       <- trained model weights (created automatically)
 │   └── README.md              <- детальна документація генерації
+├── models/                    <- model architectures
+├── train/                     <- training scripts
 └── README.md
 ```
 
@@ -96,6 +99,81 @@ python data_generation/generation.py
 
 # Оцінка якості
 python data_generation/evaluate_dataset.py data_generation/datasets/<run_folder>/
+```
+
+---
+
+## Налаштування середовища
+
+```bash
+pip install -r requirements.txt
+```
+
+Для логування в Weights & Biases:
+
+1. Створи акаунт на [wandb.ai](https://wandb.ai) (безкоштовно)
+2. Скопіюй API ключ зі [wandb.ai/settings](https://wandb.ai/settings)
+3. Додай ключ у `.env`:
+
+```bash
+cp .env.template .env
+# відредагуйте .env — вставте WANDB_API_KEY=твій_ключ
+```
+
+4. Передай назву проєкту при запуску через `--wandb-project <назва>`
+
+`.env` вже в `.gitignore` і ніколи не потрапить у репозиторій.
+Якщо `.env` відсутній або `--wandb-project` не вказано — скрипти працюють
+без W&B, просто не логуючи метрики.
+
+---
+
+## Тренування моделей
+
+Усі скрипти тренування приймають однакові аргументи і зберігають ваги в
+`<dataset>/weights/`. Параметри сигналу (`block_size`, `sample_rate`) читаються
+автоматично з `dataset_config.json`.
+
+**Загальні аргументи:**
+
+| Аргумент | За замовчуванням | Опис |
+|---|---|---|
+| `--dataset` | — | Шлях до папки датасету (обов'язковий) |
+| `--noise-type` | `non_gaussian` | `gaussian` або `non_gaussian` |
+| `--epochs` | залежить від моделі | Кількість епох |
+| `--batch-size` | `32` | Розмір батча |
+| `--lr` | `1e-4` | Learning rate |
+| `--seed` | `42` | Random seed |
+| `--wandb-project` | `""` | W&B project (порожньо = вимкнено) |
+
+```bash
+DATASET=data_generation/datasets/deep_space_polygauss_nonstationary_bpsk_bs256_n50000_39075e4f
+
+# Всі моделі одразу
+python train/train_all.py --dataset $DATASET --noise-type non_gaussian --models all --epochs 50
+
+# Окремо кожна модель
+python train/training_uae.py         --dataset $DATASET --noise-type non_gaussian --epochs 30
+python train/training_resnet.py      --dataset $DATASET --noise-type non_gaussian --epochs 50
+python train/training_vae.py         --dataset $DATASET --noise-type non_gaussian --epochs 50
+python train/training_transformer.py --dataset $DATASET --noise-type non_gaussian --epochs 50
+python train/wavelet_grid_search.py  --dataset $DATASET --noise-type non_gaussian
+
+# Тренування на гауссовому шумі для порівняння
+python train/training_uae.py --dataset $DATASET --noise-type gaussian --epochs 30
+
+# З W&B логуванням
+python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
+```
+
+Натреновані ваги зберігаються у:
+```
+<dataset>/weights/
+├── UnetAutoencoder_non_gaussian_best.pth
+├── ResNetAutoencoder_non_gaussian_best.pth
+├── SpectrogramVAE_non_gaussian_best.pth
+├── TimeSeriesTransformer_non_gaussian_best.pth
+└── Wavelet_non_gaussian_best_params.json
 ```
 
 ---

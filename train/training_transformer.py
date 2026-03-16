@@ -1,23 +1,39 @@
+import argparse
+import json
+import sys
 import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
 
 import numpy as np
 import torch
 import torch.nn as nn
-import wandb
 from torch.utils.data import DataLoader, TensorDataset, random_split
+
+try:
+    import wandb
+    WANDB_OK = True
+except Exception:
+    WANDB_OK = False
 
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
 from models.time_series_trasformer import TimeSeriesTransformer
 
-wandb.login(key="")
 
-
-class Trainer:
-    def __init__(self, model, model_name, dataset_type="gaussian", batch_size=32, epochs=50,
-                 learning_rate=1e-3, random_state=42, wandb_project="signal-denoising", device=None):
+class TransformerTrainer:
+    def __init__(self, model, model_name, dataset_path: Path, noise_type="non_gaussian",
+                 batch_size=32, epochs=50, learning_rate=1e-3, random_state=42,
+                 wandb_project="", device=None):
         self.model = model
         self.model_name = model_name
-        self.dataset_type = dataset_type
+        self.dataset_path = Path(dataset_path)
+        self.noise_type = noise_type
         self.batch_size = batch_size
         self.epochs = epochs
         self.lr = learning_rate
@@ -27,23 +43,27 @@ class Trainer:
         np.random.seed(self.random_state)
         torch.manual_seed(self.random_state)
 
-        # Unique run name
-        run_name = f"{model_name}_{dataset_type}_{uuid.uuid4().hex[:8]}"
-        wandb.init(project=wandb_project, name=run_name, config={
-            "model": model_name,
-            "datasets": dataset_type,
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "learning_rate": learning_rate,
-            "random_state": random_state
-        })
+        if WANDB_OK and wandb_project:
+            run_name = f"{model_name}_{noise_type}_{uuid.uuid4().hex[:8]}"
+            wandb.init(project=wandb_project, name=run_name, config={
+                "model": model_name,
+                "noise_type": noise_type,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "random_state": random_state
+            })
+            print(f"[W&B] Logging enabled → project='{wandb_project}', run='{run_name}'")
+        else:
+            reason = "wandb not installed" if not WANDB_OK else "no --wandb-project given"
+            print(f"[W&B] Logging disabled ({reason})")
 
     def load_data(self):
-        noisy_signals = np.load(f"../data_generation/{self.dataset_type}_signals.npy")
-        clean_signals = np.load("../data_generation/clean_signals.npy")
+        noisy_signals = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
+        clean_signals = np.load(self.dataset_path / "train" / "clean_signals.npy")
 
-        X = torch.tensor(noisy_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
-        y = torch.tensor(clean_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
+        X = torch.tensor(noisy_signals, dtype=torch.float32).unsqueeze(-1)  # (N, T, 1)
+        y = torch.tensor(clean_signals, dtype=torch.float32).unsqueeze(-1)
 
         dataset = TensorDataset(X, y)
         total_len = len(dataset)
@@ -57,8 +77,8 @@ class Trainer:
     def train(self):
         train_set, val_set, test_set = self.load_data()
         train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(val_set, batch_size=self.batch_size)
-        test_loader = DataLoader(test_set, batch_size=self.batch_size)
+        val_loader   = DataLoader(val_set,   batch_size=self.batch_size)
+        test_loader  = DataLoader(test_set,  batch_size=self.batch_size)
 
         self.model.to(self.device)
         criterion = nn.MSELoss()
@@ -69,9 +89,8 @@ class Trainer:
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
-            epoch_train_outputs = []
-            epoch_train_targets = []
             train_loss = 0.0
+            epoch_train_outputs, epoch_train_targets = [], []
 
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
@@ -80,7 +99,6 @@ class Trainer:
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
                 optimizer.step()
-
                 train_loss += loss.item()
                 epoch_train_outputs.append(y_pred.detach().cpu().numpy())
                 epoch_train_targets.append(y_batch.cpu().numpy())
@@ -88,34 +106,29 @@ class Trainer:
             val_metrics = self.compute_epoch_metrics(val_loader)
             train_metrics = self.compute_epoch_metrics_from_numpy(epoch_train_outputs, epoch_train_targets)
 
-            wandb.log({
-                "train_mse": train_metrics["MSE"],
-                "train_mae": train_metrics["MAE"],
-                "train_rmse": train_metrics["RMSE"],
-                "train_snr": train_metrics["SNR"],
-                "val_mse": val_metrics["MSE"],
-                "val_mae": val_metrics["MAE"],
-                "val_rmse": val_metrics["RMSE"],
-                "val_snr": val_metrics["SNR"],
-                "train_loss": train_loss / len(train_loader),
-            }, step=epoch)
+            if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
+                wandb.log({
+                    "train_loss": train_loss / len(train_loader),
+                    "train_mse": train_metrics["MSE"],
+                    "val_mse": val_metrics["MSE"],
+                }, step=epoch)
+
+            print(f"Epoch {epoch:02d} | "
+                  f"Train Loss: {train_loss / len(train_loader):.4f} | "
+                  f"Train MSE: {train_metrics['MSE']:.4f} | "
+                  f"Val MSE: {val_metrics['MSE']:.4f}")
 
             if val_metrics["MSE"] < best_val_loss:
                 best_val_loss = val_metrics["MSE"]
                 best_weights = self.model.state_dict()
 
-            print(f"Epoch {epoch:02d} | "
-                  f"Train Loss: {train_metrics['train_loss']:.4f} | "
-                  f"Train MSE: {train_metrics['MSE']:.4f} | "
-                  f"Val MSE: {val_metrics['MSE']:.4f}")
-
-        # Save best model
-        model_path = f"../weights/{self.model_name}_{self.dataset_type}_best.pth"
-        torch.save(best_weights, model_path)
-        print(f"✅ Best model saved to {model_path}")
+        weights_dir = self.dataset_path / "weights"
+        weights_dir.mkdir(exist_ok=True)
+        save_path = weights_dir / f"{self.model_name}_{self.noise_type}_best.pth"
+        torch.save(best_weights, save_path)
+        print(f"✅ Best model saved to {save_path}")
         self.model.load_state_dict(best_weights)
-
-        self.final_eval_metrics = self.evaluate_metrics(test_loader)
+        self.evaluate_metrics(test_loader)
 
     def compute_epoch_metrics(self, loader):
         self.model.eval()
@@ -123,7 +136,7 @@ class Trainer:
         with torch.no_grad():
             for X_batch, y_batch in loader:
                 X_batch = X_batch.to(self.device)
-                preds = self.model(X_batch).cpu().squeeze().numpy()
+                preds  = self.model(X_batch).cpu().squeeze().numpy()
                 truths = y_batch.squeeze().numpy()
                 y_pred.append(preds)
                 y_true.append(truths)
@@ -136,59 +149,56 @@ class Trainer:
 
     def compute_metrics(self, y_true, y_pred):
         return {
-            "MSE": MeanSquaredError.calculate(y_true, y_pred),
-            "MAE": MeanAbsoluteError.calculate(y_true, y_pred),
+            "MSE":  MeanSquaredError.calculate(y_true, y_pred),
+            "MAE":  MeanAbsoluteError.calculate(y_true, y_pred),
             "RMSE": RootMeanSquaredError.calculate(y_true, y_pred),
-            "SNR": SignalToNoiseRatio.calculate(y_true, y_pred),
+            "SNR":  SignalToNoiseRatio.calculate(y_true, y_pred),
         }
 
     def evaluate_metrics(self, loader):
         metrics = self.compute_epoch_metrics(loader)
-        wandb.log({
-            "test_mse": metrics["MSE"],
-            "test_mae": metrics["MAE"],
-            "test_rmse": metrics["RMSE"],
-            "test_snr": metrics["SNR"],
-        })
-
+        if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
+            wandb.log({f"test_{k.lower()}": v for k, v in metrics.items()})
         print("\n📊 Final Test Metrics:")
         for name, value in metrics.items():
-            print(f"{name}: {value:.4f}" if name != "SNR" else f"{name}: {value:.2f} dB")
-
+            print(f"  {name}: {value:.2f} dB" if name == "SNR" else f"  {name}: {value:.6f}")
         return metrics
-
-    def evaluate(self, loader, criterion):
-        self.model.eval()
-        total_loss = 0
-        with torch.no_grad():
-            for X_batch, y_batch in loader:
-                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
-                y_pred = self.model(X_batch)
-                loss = criterion(y_pred, y_batch)
-                total_loss += loss.item()
-        return total_loss / len(loader)
 
 
 if __name__ == "__main__":
-    input_dim = 1
-    dataset_type = "non_gaussian"  # or "non_gaussian"
-    random_state = 42
-    batch_size = 32
-    epochs = 50
-    learning_rate = 1e-4
-    wandb_project = "signal-denoising"
+    p = argparse.ArgumentParser(description="Train Transformer for signal denoising")
+    p.add_argument("--dataset", required=True,
+                   help="Path to dataset folder (e.g. data_generation/datasets/<name>)")
+    p.add_argument("--noise-type", default="non_gaussian", choices=["gaussian", "non_gaussian"])
+    p.add_argument("--epochs",     type=int,   default=50)
+    p.add_argument("--batch-size", type=int,   default=32)
+    p.add_argument("--lr",         type=float, default=1e-4)
+    p.add_argument("--seed",       type=int,   default=42)
+    p.add_argument("--wandb-project", default="")
+    args = p.parse_args()
 
-    model = TimeSeriesTransformer(input_dim=input_dim)
+    dataset_path = Path(args.dataset)
+    if not dataset_path.is_absolute():
+        dataset_path = ROOT / dataset_path
 
-    trainer = Trainer(
+    with open(dataset_path / "dataset_config.json") as f:
+        cfg = json.load(f)
+
+    print(f"Dataset: {dataset_path.name}")
+    print(f"Config:  block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
+          f"noise_type={args.noise_type}")
+
+    model = TimeSeriesTransformer(input_dim=1)
+
+    trainer = TransformerTrainer(
         model=model,
         model_name="TimeSeriesTransformer",
-        dataset_type=dataset_type,
-        batch_size=batch_size,
-        epochs=epochs,
-        learning_rate=learning_rate,
-        random_state=random_state,
-        wandb_project=wandb_project,
+        dataset_path=dataset_path,
+        noise_type=args.noise_type,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        learning_rate=args.lr,
+        random_state=args.seed,
+        wandb_project=args.wandb_project,
     )
-
     trainer.train()

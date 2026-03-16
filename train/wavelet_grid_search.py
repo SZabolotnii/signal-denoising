@@ -1,4 +1,13 @@
+import sys
 from itertools import product
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
 
 import numpy as np
 import pywt
@@ -89,34 +98,57 @@ def grid_search_wavelet(noisy: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Приклад використання
 if __name__ == "__main__":
-    # завантаження вашого датасету
-    noisy = np.load("../data_generation/non_gaussian_signals.npy")  # або non_gaussian_signals.npy
-    clean = np.load("../data_generation/clean_signals.npy")
+    import argparse
+    import json
+    import sys
+    from pathlib import Path
+
+    ROOT = Path(__file__).resolve().parent.parent
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    p = argparse.ArgumentParser(description="Wavelet grid search for signal denoising")
+    p.add_argument("--dataset", required=True,
+                   help="Path to dataset folder (e.g. data_generation/datasets/<name>)")
+    p.add_argument("--noise-type", default="non_gaussian", choices=["gaussian", "non_gaussian"])
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--plot", action="store_true", help="Plot an example denoising result")
+    args = p.parse_args()
+
+    dataset_path = Path(args.dataset)
+    if not dataset_path.is_absolute():
+        dataset_path = ROOT / dataset_path
+
+    with open(dataset_path / "dataset_config.json") as f:
+        cfg = json.load(f)
+
+    print(f"Dataset: {dataset_path.name}")
+    print(f"Config:  block_size={cfg['block_size']}, noise_type={args.noise_type}")
+
+    noisy = np.load(dataset_path / "train" / f"{args.noise_type}_signals.npy")
+    clean = np.load(dataset_path / "train" / "clean_signals.npy")
     assert noisy.shape == clean.shape
 
-    best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean)
+    best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean, random_state=args.seed)
 
-    # продемонструємо один кейс з найкращими параметрами
-    denoiser = WaveletDenoising().set_params(**best_params)
-    idx = 0
-    x_noisy, x_clean = noisy[idx], clean[idx]
-    x_den = denoiser.denoise(x_noisy)
+    weights_dir = dataset_path / "weights"
+    weights_dir.mkdir(exist_ok=True)
+    save_path = weights_dir / f"Wavelet_{args.noise_type}_best_params.json"
+    with open(save_path, "w") as f:
+        json.dump({"best_params": best_params, "val_mse": val_mse, "test_mse": test_mse}, f, indent=2)
+    print(f"✅ Best params saved to: {save_path}")
 
-    import matplotlib.pyplot as plt
-
-    t = np.arange(len(x_noisy))
-    plt.figure(figsize=(12, 5))
-    plt.plot(t, x_clean, label="Clean", linewidth=2, color="black")
-    plt.plot(t, x_noisy, label="Noisy", alpha=0.5, color="gray")
-    plt.plot(t, x_den, label="Wavelet (tuned)", linestyle="--", linewidth=2)
-    plt.title("Wavelet Denoising with tuned hyperparams (MSE)")
-    plt.xlabel("Sample")
-    plt.ylabel("Amplitude")
-    plt.ylim([-2, 2])
-    plt.xlim([0, 400])
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    if args.plot:
+        import matplotlib.pyplot as plt
+        denoiser = WaveletDenoising().set_params(**best_params)
+        x_noisy, x_clean = noisy[0], clean[0]
+        x_den = denoiser.denoise(x_noisy)
+        t = np.arange(len(x_noisy))
+        plt.figure(figsize=(12, 5))
+        plt.plot(t, x_clean, label="Clean", linewidth=2, color="black")
+        plt.plot(t, x_noisy, label="Noisy", alpha=0.5, color="gray")
+        plt.plot(t, x_den, label="Wavelet (tuned)", linestyle="--", linewidth=2)
+        plt.title("Wavelet Denoising with tuned hyperparams (MSE)")
+        plt.xlabel("Sample"); plt.ylabel("Amplitude")
+        plt.grid(True); plt.legend(); plt.tight_layout(); plt.show()
