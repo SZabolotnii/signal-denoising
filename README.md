@@ -158,6 +158,7 @@ python train/training_resnet.py      --dataset $DATASET --noise-type non_gaussia
 python train/training_vae.py         --dataset $DATASET --noise-type non_gaussian --epochs 50
 python train/training_transformer.py --dataset $DATASET --noise-type non_gaussian --epochs 50
 python train/wavelet_grid_search.py  --dataset $DATASET --noise-type non_gaussian
+python train/training_hybrid.py      --dataset $DATASET --noise-type non_gaussian --epochs 30
 
 # Тренування на гауссовому шумі для порівняння
 python train/training_uae.py --dataset $DATASET --noise-type gaussian --epochs 30
@@ -173,7 +174,28 @@ python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
 ├── ResNetAutoencoder_non_gaussian_best.pth
 ├── SpectrogramVAE_non_gaussian_best.pth
 ├── TimeSeriesTransformer_non_gaussian_best.pth
-└── Wavelet_non_gaussian_best_params.json
+├── Wavelet_non_gaussian_best_params.json
+├── HybridDSGE_UNet_non_gaussian_S3_best.pth
+└── dsge_state_non_gaussian_S3.npz
+```
+
+### HybridDSGE_UNet
+
+Гібридна архітектура (інтеграція DSGE + U-Net). Додаткові параметри:
+
+| Аргумент | За замовчуванням | Опис |
+|---|---|---|
+| `--dsge-order` | `3` | Кількість DSGE-каналів (S) |
+| `--dsge-basis` | `fractional` | Тип базисних функцій: `fractional`, `polynomial`, `trigonometric`, `robust` |
+| `--dsge-powers` | `0.5 1.5 2.0` | Степені/частоти для basis (через пробіл) |
+| `--lambda` | `0.01` | Коефіцієнт λ для регуляризації Тіхонова |
+
+```bash
+# Тренування гібридної моделі
+python train/training_hybrid.py --dataset $DATASET --noise-type non_gaussian
+
+# Inference / оцінка на тестовому наборі
+python inference/inference_hybrid.py --dataset $DATASET --noise-type non_gaussian
 ```
 
 ---

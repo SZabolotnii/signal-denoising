@@ -43,7 +43,7 @@ from models.time_series_trasformer import TimeSeriesTransformer
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
 from train.wavelet_grid_search import grid_search_wavelet
 
-ALL_MODELS = ["unet", "resnet", "vae", "transformer", "wavelet"]
+ALL_MODELS = ["unet", "resnet", "vae", "transformer", "wavelet", "hybrid"]
 
 
 # ─── metrics ──────────────────────────────────────────────────────────────────
@@ -428,6 +428,31 @@ def train_wavelet(clean, noisy, cfg, args, weights_dir):
     print(f"  Saved: {save_path}")
 
 
+# ─── Hybrid DSGE+UNet ─────────────────────────────────────────────────────────
+
+def train_hybrid(dataset_dir: Path, cfg: dict, args):
+    print("\n=== HybridDSGE_UNet ===")
+    from train.training_hybrid import HybridUnetTrainer
+    signal_len = cfg["block_size"]
+    fs         = cfg["sample_rate"]
+    noverlap   = args.nperseg // 2
+
+    trainer = HybridUnetTrainer(
+        dataset_path=dataset_dir,
+        noise_type=args.noise_type,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        learning_rate=args.lr,
+        signal_len=signal_len,
+        fs=fs,
+        nperseg=args.nperseg,
+        noverlap=noverlap,
+        random_state=args.seed,
+        wandb_project=args.wandb_project,
+    )
+    trainer.train()
+
+
 # ─── shared helpers ───────────────────────────────────────────────────────────
 
 def _log_epoch(name: str, epoch: int, total: int, train_loss: float, val_loss: float):
@@ -508,6 +533,7 @@ def main():
         elif m == "vae":         train_vae(clean, noisy, cfg, args, weights_dir, device)
         elif m == "transformer": train_transformer(clean, noisy, cfg, args, weights_dir, device)
         elif m == "wavelet":     train_wavelet(clean, noisy, cfg, args, weights_dir)
+        elif m == "hybrid":      train_hybrid(dataset_dir, cfg, args)
         else:                    print(f"Unknown model: {m}, skipping")
 
     print("\n✅ Done. Weights saved to:", weights_dir)
