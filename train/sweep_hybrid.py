@@ -60,7 +60,7 @@ def parse_args():
     p.add_argument("--noise-type",    default="non_gaussian",
                    choices=["gaussian", "non_gaussian"])
     p.add_argument("--epochs",        type=int,   default=30)
-    p.add_argument("--batch-size",    type=int,   default=32)
+    p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--nperseg",       type=int,   default=32)
     p.add_argument("--lambda",        type=float, default=0.01, dest="tikhonov_lambda")

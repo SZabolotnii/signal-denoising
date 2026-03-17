@@ -56,7 +56,7 @@ class HybridUnetTrainer:
         dsge_basis: str = 'fractional',
         dsge_powers: list | None = None,
         tikhonov_lambda: float = 0.01,
-        batch_size: int = 32,
+        batch_size: int = 256,
         epochs: int = 30,
         learning_rate: float = 1e-4,
         signal_len: int = 256,
@@ -137,8 +137,8 @@ class HybridUnetTrainer:
             torch.tensor(clean, dtype=torch.float32),
         )
         total = len(dataset)
-        val_len  = int(0.15 * total)
-        test_len = int(0.15 * total)
+        val_len  = int(0.25 * total)
+        test_len = int(0.25 * total)
         train_len = total - val_len - test_len
         g = torch.Generator().manual_seed(self.random_state)
         train_set, val_set, test_set = random_split(dataset, [train_len, val_len, test_len], generator=g)
@@ -358,7 +358,7 @@ if __name__ == '__main__':
     p.add_argument('--dataset',       required=True)
     p.add_argument('--noise-type',    default='non_gaussian', choices=['gaussian', 'non_gaussian'])
     p.add_argument('--epochs',        type=int,   default=30)
-    p.add_argument('--batch-size',    type=int,   default=32)
+    p.add_argument('--batch-size',    type=int,   default=256)
     p.add_argument('--lr',            type=float, default=1e-4)
     p.add_argument('--dsge-order',    type=int,   default=3)
     p.add_argument('--dsge-basis',    type=str,   default='fractional',

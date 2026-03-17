@@ -32,7 +32,7 @@ MODEL_NAME = 'TimeSeriesTransformer'
 
 class TransformerTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=32, epochs=50, learning_rate=1e-4, random_state=42,
+                 batch_size=256, epochs=50, learning_rate=1e-4, random_state=42,
                  wandb_project="", device=None):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
@@ -74,8 +74,8 @@ class TransformerTrainer:
 
         dataset = TensorDataset(X, y)
         total = len(dataset)
-        val_len  = int(0.15 * total)
-        test_len = int(0.15 * total)
+        val_len  = int(0.25 * total)
+        test_len = int(0.25 * total)
         train_len = total - val_len - test_len
         train_set, val_set, test_set = random_split(
             dataset, [train_len, val_len, test_len],
@@ -223,7 +223,7 @@ if __name__ == "__main__":
     p.add_argument("--dataset",       required=True)
     p.add_argument("--noise-type",    default="non_gaussian", choices=["gaussian", "non_gaussian"])
     p.add_argument("--epochs",        type=int,   default=50)
-    p.add_argument("--batch-size",    type=int,   default=32)
+    p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="")

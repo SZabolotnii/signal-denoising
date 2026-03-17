@@ -41,8 +41,8 @@ def grid_search_wavelet(noisy: np.ndarray,
     rng = np.random.default_rng(random_state)
     idx = np.arange(N)
     rng.shuffle(idx)
-    train_end = int(0.7 * N)
-    val_end = int(0.9 * N)
+    train_end = int(0.5 * N)
+    val_end = int(0.75 * N)
     train_idx, val_idx, test_idx = idx[:train_end], idx[train_end:val_end], idx[val_end:]
 
     X_val,  y_val  = noisy[val_idx],  clean[val_idx]

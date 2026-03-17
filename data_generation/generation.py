@@ -716,10 +716,10 @@ if __name__ == "__main__":
     )
 
     # Dataset size
-    parser.add_argument("--num_train",       type=int, default=50_000,
-                        help="Training samples (default: 50000)")
-    parser.add_argument("--samples_per_snr", type=int, default=500,
-                        help="Test samples per SNR point (default: 500)")
+    parser.add_argument("--num_train",       type=int, default=200_000,
+                        help="Training samples (default: 200000)")
+    parser.add_argument("--samples_per_snr", type=int, default=5000,
+                        help="Test samples per SNR point (default: 5000)")
 
     args = parser.parse_args()
 
@@ -755,8 +755,8 @@ if __name__ == "__main__":
     POLY_RANDOM_K = tuple(args.polygauss_random_k) if args.polygauss_random_k else None
 
     TEST_SNR_POINTS = {
-        "deep_space":    (-20, -15, -12, -10, -7, -5, 0),
-        "fpv_telemetry": (-5, 0, 3, 5, 8, 10, 15),
+        "deep_space":    (-20, -17, -15, -12, -10, -7, -5, -3, 0, 3),
+        "fpv_telemetry": (-5, -2, 0, 3, 5, 8, 10, 12, 15, 18),
     }[SCENARIO]
 
     import json, uuid

@@ -217,7 +217,7 @@ python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
 | `--noise-types` | `all` | `gaussian`, `non_gaussian` або `all` |
 | `--models` | `all` | Через кому або `all`: `unet,resnet,vae,transformer,wavelet,hybrid` |
 | `--epochs` | `50` | Кількість епох |
-| `--batch-size` | `32` | Розмір батча |
+| `--batch-size` | `256` | Розмір батча |
 | `--lr` | `1e-4` | Learning rate |
 | `--nperseg` | `32` | Розмір вікна STFT (для спектральних моделей) |
 | `--seed` | `42` | Random seed |

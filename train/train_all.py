@@ -235,7 +235,7 @@ def parse_args():
     p.add_argument("--models",        default="all",
                    help=f"Comma-separated or 'all'. Options: {', '.join(ALL_MODELS)}")
     p.add_argument("--epochs",        type=int,   default=50)
-    p.add_argument("--batch-size",    type=int,   default=32)
+    p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--nperseg",       type=int,   default=32,
                    help="STFT window size for spectral models (default 32 for 256-sample signals)")
