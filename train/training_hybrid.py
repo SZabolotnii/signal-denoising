@@ -287,19 +287,19 @@ class HybridUnetTrainer:
                 best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
         # ── save ──────────────────────────────────────────────────────────────
-        weights_dir = self.dataset_path / "weights"
-        weights_dir.mkdir(exist_ok=True)
+        run_dir = self.dataset_path / "weights" / "runs" / f"{self.model_name}_{self.noise_type}"
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-        model_path = weights_dir / f"{self.model_name}_{self.noise_type}_{self.dataset_uid}_best.pth"
+        model_path = run_dir / "model_best.pth"
         save_training_curves(
             train_history, val_snr_history,
-            weights_dir / "figures" / "training" / f"training_curves_{self.model_name}_{self.noise_type}.png",
+            run_dir / "figures" / "training_curves.png",
             self.model_name, self.noise_type,
         )
         torch.save(best_sd, model_path)
         print(f"✅ Best model saved → {model_path}")
 
-        dsge_path = weights_dir / f"dsge_state_{self.noise_type}_{self.dsge_basis}_S{self.dsge_order}.npz"
+        dsge_path = run_dir / "dsge_state.npz"
         self.dsge.save_state(str(dsge_path))
 
         self.model.load_state_dict(best_sd)
@@ -315,7 +315,7 @@ class HybridUnetTrainer:
             print_snr_table(per_snr, self.model_name)
             plot_snr_curve(
                 per_snr, self.model_name,
-                save_path=weights_dir / f"snr_curve_{self.model_name}_{self.noise_type}.png",
+                save_path=run_dir / "figures" / "snr_curve.png",
             )
             log_snr_curve_wandb(per_snr, self.model_name)
 

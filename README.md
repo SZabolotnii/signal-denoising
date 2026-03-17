@@ -70,11 +70,29 @@ signal-denoising/
 │           ├── train/         <- clean_signals.npy, gaussian_signals.npy, non_gaussian_signals.npy
 │           ├── test/          <- per-SNR test files: test_m10dB_gaussian.npy, ...
 │           └── weights/       <- ваги моделей (створюється автоматично)
-│               ├── figures/
-│               │   ├── training/   <- криві навчання (loss/val_SNR per epoch)
-│               │   └── *.png       <- графіки порівняльного звіту
-│               ├── *_best.pth
-│               └── comparison_report_*.md
+│               ├── runs/
+│               │   ├── UnetAutoencoder_gaussian/
+│               │   │   ├── model_best.pth
+│               │   │   └── figures/
+│               │   │       ├── training_curves.png
+│               │   │       └── snr_curve.png
+│               │   ├── UnetAutoencoder_non_gaussian/
+│               │   ├── HybridDSGE_UNet_fractional_S3_gaussian/
+│               │   │   ├── model_best.pth
+│               │   │   ├── dsge_state.npz
+│               │   │   └── figures/
+│               │   └── Wavelet_gaussian/
+│               │       └── best_params.json
+│               ├── figures/           <- порівняльні графіки (compare_report.py)
+│               │   ├── fig1_snr_heatmap.png
+│               │   ├── fig2_combined_snr_curves.png
+│               │   ├── fig3_per_model_comparison.png
+│               │   ├── fig4_dsge_scatter.png
+│               │   └── fig5_example_denoising.png
+│               ├── comparison_report_<ts>.md
+│               ├── comparison_report_<ts>_uk.md
+│               ├── comparison_data_<ts>.csv
+│               └── training_report_<ts>.md
 ├── models/                    <- архітектури моделей
 │   ├── autoencoder_unet.py
 │   ├── autoencoder_resnet.py
@@ -209,30 +227,31 @@ python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
 
 ```
 weights/
-├── UnetAutoencoder_gaussian_<uid>_best.pth
-├── UnetAutoencoder_non_gaussian_<uid>_best.pth
-├── ResNetAutoencoder_gaussian_<uid>_best.pth
-├── ResNetAutoencoder_non_gaussian_<uid>_best.pth
-├── SpectrogramVAE_gaussian_<uid>_best.pth
-├── SpectrogramVAE_non_gaussian_<uid>_best.pth
-├── TimeSeriesTransformer_gaussian_<uid>_best.pth
-├── TimeSeriesTransformer_non_gaussian_<uid>_best.pth
-├── HybridDSGE_UNet_fractional_S3_gaussian_<uid>_best.pth
-├── HybridDSGE_UNet_fractional_S3_non_gaussian_<uid>_best.pth
-├── dsge_state_gaussian_fractional_S3.npz
-├── dsge_state_non_gaussian_fractional_S3.npz
-├── Wavelet_gaussian_best_params.json
-├── Wavelet_non_gaussian_best_params.json
-├── training_report_<timestamp>.md
-├── figures/
-│   └── training/
-│       ├── training_curves_UnetAutoencoder_gaussian.png
-│       └── ...
-└── ...
+├── runs/
+│   ├── UnetAutoencoder_gaussian/
+│   │   ├── model_best.pth
+│   │   └── figures/
+│   │       ├── training_curves.png   <- loss + val_SNR по епохах
+│   │       └── snr_curve.png
+│   ├── UnetAutoencoder_non_gaussian/
+│   ├── ResNetAutoencoder_gaussian/
+│   ├── ResNetAutoencoder_non_gaussian/
+│   ├── SpectrogramVAE_gaussian/
+│   ├── SpectrogramVAE_non_gaussian/
+│   ├── TimeSeriesTransformer_gaussian/
+│   ├── TimeSeriesTransformer_non_gaussian/
+│   ├── HybridDSGE_UNet_fractional_S3_gaussian/
+│   │   ├── model_best.pth
+│   │   └── dsge_state.npz
+│   ├── HybridDSGE_UNet_fractional_S3_non_gaussian/
+│   ├── Wavelet_gaussian/
+│   │   └── best_params.json
+│   └── Wavelet_non_gaussian/
+└── training_report_<timestamp>.md
 ```
 
-Файли ваг перезаписуються при повторному запуску — зберігається лише найкраща
-модель за `val_SNR` для кожної комбінації (модель × тип шуму).
+Кожна підпапка в `runs/` перезаписується при повторному запуску — зберігається
+лише найкраща модель за `val_SNR` для кожної комбінації (модель × тип шуму).
 
 ### Тренування окремих моделей
 
@@ -279,14 +298,19 @@ python train/compare_report.py --dataset $DATASET
 
 | Файл | Опис |
 |------|------|
-| `comparison_report_<ts>.md` | Звіт англійською |
+| `comparison_report_<ts>.md` | Звіт англійською (з поясненнями) |
 | `comparison_report_<ts>_uk.md` | Звіт українською |
-| `comparison_report_<ts>.json` | Машиночитані дані |
-| `figures/fig1_snr_heatmap.png` | Теплова карта SNR: моделі × (train→test) |
-| `figures/fig2_snr_curves.png` | Криві SNR (2×2: train type × test type) |
-| `figures/fig3_dsge_scatter.png` | Scatter архітектур DSGE (узагальнення) |
-| `figures/fig4_bar_mse.png` | MSE по моделях і типах шуму |
+| `comparison_data_<ts>.csv` | Плоска таблиця всіх метрик (model × train × test × SNR_in) |
+| `comparison_data_<ts>.json` | Те саме у JSON |
+| `figures/fig1_snr_heatmap.png` | Теплова карта SNR: всі комбінації train→test |
+| `figures/fig2_combined_snr_curves.png` | Всі моделі на одному графіку (суцільний = G-train, штрих = NG-train) |
+| `figures/fig3_per_model_comparison.png` | Для кожної моделі: вплив типу навчання на криву SNR |
+| `figures/fig4_dsge_scatter.png` | Scatter архітектур DSGE: узагальнення по обох тестах |
 | `figures/fig5_example_denoising.png` | Приклад знешумлення сигналу |
+
+Крім того, для кожного навченого варіанту в `runs/<ModelName>_<noise_type>/figures/` зберігаються:
+- `training_curves.png` — loss і val_SNR по епохах (для контролю оверфіту, не в основному звіті)
+- `snr_curve.png` — крива SNR на тренувальному типі шуму
 
 ---
 

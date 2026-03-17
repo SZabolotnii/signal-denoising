@@ -197,15 +197,14 @@ class ResNetAutoencoderTrainer:
                 best_val_snr = val_snr
                 best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
-        weights_dir = self.dataset_path / "weights"
-        weights_dir.mkdir(exist_ok=True)
-        save_name = f"{MODEL_NAME}_{self.noise_type}_{self.dataset_uid}_best.pth"
+        run_dir = self.dataset_path / "weights" / "runs" / f"{MODEL_NAME}_{self.noise_type}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        save_path = run_dir / "model_best.pth"
         save_training_curves(
             train_history, val_snr_history,
-            weights_dir / "figures" / "training" / f"training_curves_{MODEL_NAME}_{self.noise_type}.png",
+            run_dir / "figures" / "training_curves.png",
             MODEL_NAME, self.noise_type,
         )
-        save_path = weights_dir / save_name
         torch.save(best_sd, save_path)
         print(f"✅ Best model saved → {save_path}")
         self.model.load_state_dict(best_sd)
@@ -219,7 +218,7 @@ class ResNetAutoencoderTrainer:
             print_snr_table(per_snr, MODEL_NAME)
             plot_snr_curve(
                 per_snr, MODEL_NAME,
-                save_path=weights_dir / f"snr_curve_{MODEL_NAME}_{self.noise_type}.png",
+                save_path=run_dir / "figures" / "snr_curve.png",
             )
             log_snr_curve_wandb(per_snr, MODEL_NAME)
 

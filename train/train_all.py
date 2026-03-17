@@ -122,9 +122,9 @@ def run_wavelet(dataset_dir: Path, cfg: dict, args) -> dict | None:
     best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean, random_state=args.seed)
     print(f"  Best params: {best_params}")
     print(f"  Val MSE: {val_mse:.6f}  Test MSE: {test_mse:.6f}")
-    weights_dir = dataset_dir / "weights"
-    weights_dir.mkdir(exist_ok=True)
-    save_path = weights_dir / f"Wavelet_{args.noise_type}_best_params.json"
+    run_dir = dataset_dir / "weights" / "runs" / f"Wavelet_{args.noise_type}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_path = run_dir / "best_params.json"
     with open(save_path, "w") as f:
         json.dump({"best_params": best_params, "val_mse": val_mse, "test_mse": test_mse}, f, indent=2)
     print(f"  Saved: {save_path}")
@@ -202,8 +202,12 @@ def generate_report(results: list, dataset_dir: Path, args, weights_dir: Path):
             val_str  = f"{val_snr:.2f} dB"  if val_snr  is not None else "—"
             snr_str  = f"{test_snr:.2f} dB" if test_snr is not None else "—"
             mse_str  = f"{test_mse:.6f}"    if test_mse is not None else "—"
-            wname    = Path(r.get('weights_path', '')).name
-            f.write(f"| {r['model']} | {val_str} | {snr_str} | {mse_str} | `{wname}` |\n")
+            wpath = Path(r.get('weights_path', ''))
+            try:
+                wname = str(wpath.relative_to(weights_dir))
+            except ValueError:
+                wname = wpath.name
+            f.write(f"| {r['model']} ({r.get('noise_type','')}) | {val_str} | {snr_str} | {mse_str} | `{wname}` |\n")
 
         # per-SNR table (first model that has it)
         for r in results:

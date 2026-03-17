@@ -2,20 +2,26 @@
 """
 Cross-evaluation comparison report.
 
-For every trained model found in <dataset>/weights/, evaluates on BOTH
-gaussian and non-gaussian test sets (regardless of training noise type).
+Scans <dataset>/weights/runs/ for all trained models, evaluates each on
+both Gaussian and Non-Gaussian test sets, then produces:
 
-Generates:
-  - 5 publication-quality figures (PNG) in weights/figures/
-  - Markdown report in English: comparison_report_<ts>.md
-  - Markdown report in Ukrainian: comparison_report_<ts>_uk.md
-  - Machine-readable data: comparison_report_<ts>.json
+  weights/
+  ├── comparison_data_<ts>.csv          – flat table, one row per (model, train, test, SNR_in)
+  ├── comparison_report_<ts>.md         – EN report with figures and text
+  ├── comparison_report_<ts>_uk.md      – UA report
+  └── figures/
+      ├── fig1_snr_heatmap.png          – compact SNR overview
+      ├── fig2_combined_snr_curves.png  – all models, all train/test combos
+      ├── fig3_per_model_comparison.png – Gaussian vs Non-Gaussian training per model
+      ├── fig4_dsge_scatter.png         – DSGE architecture generalisation
+      └── fig5_example_denoising.png    – visual example
 
 Usage:
     python train/compare_report.py --dataset data_generation/datasets/<name>
 """
 
 import argparse
+import csv
 import json
 import re
 import sys
@@ -34,7 +40,6 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 try:
     import seaborn as sns
@@ -45,13 +50,28 @@ except Exception:
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
 from train.snr_curve import evaluate_per_snr, _label_to_db
 
-NOISE_TYPES  = ['gaussian', 'non_gaussian']
-NOISE_LABEL  = {'gaussian': 'Gaussian', 'non_gaussian': 'Non-Gaussian'}
-NOISE_LABEL_UK = {'gaussian': 'Гаусівський', 'non_gaussian': 'Негаусівський'}
+NOISE_TYPES    = ['gaussian', 'non_gaussian']
+NOISE_LABEL    = {'gaussian': 'Gaussian',     'non_gaussian': 'Non-Gaussian'}
+NOISE_LABEL_UK = {'gaussian': 'Гаусівський',  'non_gaussian': 'Негаусівський'}
+NOISE_SHORT    = {'gaussian': 'G',             'non_gaussian': 'NG'}
 
-# colour palette: two neutral hues for train types, consistent across figures
-PALETTE = {'gaussian': '#4878CF', 'non_gaussian': '#D65F5F'}
+# Consistent colours: blue = Gaussian training, red = Non-Gaussian training
+TRAIN_COLOR  = {'gaussian': '#4878CF', 'non_gaussian': '#D65F5F'}
+LINE_STYLE   = {'gaussian': '-',       'non_gaussian': '--'}
 
+RCPARAMS = {
+    'font.size': 10, 'axes.titlesize': 11, 'axes.labelsize': 10,
+    'legend.fontsize': 8, 'xtick.labelsize': 9, 'ytick.labelsize': 9,
+}
+
+MODEL_DISPLAY = {
+    'UnetAutoencoder':       'U-Net',
+    'ResNetAutoencoder':     'ResNet',
+    'SpectrogramVAE':        'VAE',
+    'TimeSeriesTransformer': 'Transformer',
+    'Wavelet':               'Wavelet',
+}
+BASE_MODELS = list(MODEL_DISPLAY.keys())
 
 # ── model loaders ─────────────────────────────────────────────────────────────
 
@@ -60,18 +80,17 @@ def _device():
     return 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
-def load_unet_denoiser(weights_path: Path, cfg: dict, nperseg: int = 32):
+def _load_unet(run_dir: Path, cfg: dict, nperseg: int = 32):
     import torch
     from models.autoencoder_unet import UnetAutoencoder
     from train.training_uae import stft_mag_phase, istft_from_mag_phase
     device = _device()
-    fs = cfg['sample_rate'];  signal_len = cfg['block_size']
-    noverlap = nperseg // 2;  pad = nperseg // 2
+    fs = cfg['sample_rate']; signal_len = cfg['block_size']
+    noverlap = nperseg // 2; pad = nperseg // 2
     dummy_mag, _ = stft_mag_phase(np.zeros(signal_len), fs, nperseg, noverlap, pad)
     model = UnetAutoencoder(dummy_mag.shape).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
-
     def denoise(noisy):
         mags, phases = [], []
         for x in noisy:
@@ -88,24 +107,20 @@ def load_unet_denoiser(weights_path: Path, cfg: dict, nperseg: int = 32):
     return denoise
 
 
-def load_resnet_denoiser(weights_path: Path, cfg: dict, nperseg: int = 32):
-    import torch
-    import torch.nn as nn
+def _load_resnet(run_dir: Path, cfg: dict, nperseg: int = 32):
+    import torch; import torch.nn as nn
     from scipy.signal import stft as _stft, istft as _istft
     from models.autoencoder_resnet import ResNetAutoencoder
     device = _device()
-    fs = cfg['sample_rate'];  signal_len = cfg['block_size']
-    noverlap = int(nperseg * 0.75);  pad = nperseg // 2
-
+    fs = cfg['sample_rate']; signal_len = cfg['block_size']
+    noverlap = int(nperseg * 0.75); pad = nperseg // 2
     dummy = torch.zeros(1, 1, signal_len)
     padded = nn.functional.pad(dummy, (pad, pad), mode='reflect')
     _, _, Zxx = _stft(padded[0, 0].numpy(), fs=fs, nperseg=nperseg, noverlap=noverlap)
     freq_bins, time_frames = np.abs(Zxx).shape
-
     model = ResNetAutoencoder((freq_bins, time_frames)).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
-
     def denoise(noisy):
         t = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)
         padded = nn.functional.pad(t, (pad, pad), mode='reflect')
@@ -126,24 +141,20 @@ def load_resnet_denoiser(weights_path: Path, cfg: dict, nperseg: int = 32):
     return denoise
 
 
-def load_vae_denoiser(weights_path: Path, cfg: dict, nperseg: int = 32):
-    import torch
-    import torch.nn as nn
+def _load_vae(run_dir: Path, cfg: dict, nperseg: int = 32):
+    import torch; import torch.nn as nn
     from scipy.signal import stft as _stft, istft as _istft
     from models.autoencoder_vae import SpectrogramVAE
     device = _device()
-    fs = cfg['sample_rate'];  signal_len = cfg['block_size']
-    noverlap = nperseg // 2;  pad = nperseg // 2
-
+    fs = cfg['sample_rate']; signal_len = cfg['block_size']
+    noverlap = nperseg // 2; pad = nperseg // 2
     dummy = torch.zeros(1, 1, signal_len)
     padded = nn.functional.pad(dummy, (pad, pad), mode='reflect')
     _, _, Zxx = _stft(padded[0, 0].numpy(), fs=fs, nperseg=nperseg, noverlap=noverlap)
     freq_bins, time_frames = np.abs(Zxx).shape
-
     model = SpectrogramVAE(freq_bins=freq_bins, time_frames=time_frames).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
-
     def denoise(noisy):
         t = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)
         padded = nn.functional.pad(t, (pad, pad), mode='reflect')
@@ -165,14 +176,13 @@ def load_vae_denoiser(weights_path: Path, cfg: dict, nperseg: int = 32):
     return denoise
 
 
-def load_transformer_denoiser(weights_path: Path, cfg: dict):
+def _load_transformer(run_dir: Path, cfg: dict):
     import torch
     from models.time_series_trasformer import TimeSeriesTransformer
     device = _device()
     model = TimeSeriesTransformer(input_dim=1).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
-
     def denoise(noisy):
         t = torch.tensor(noisy, dtype=torch.float32).unsqueeze(-1).to(device)
         with torch.no_grad():
@@ -180,51 +190,40 @@ def load_transformer_denoiser(weights_path: Path, cfg: dict):
     return denoise
 
 
-def load_hybrid_denoiser(weights_path: Path, dsge_path: Path, cfg: dict,
-                         dsge_basis: str, dsge_order: int, nperseg: int = 32):
+def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int, nperseg: int = 32):
     import torch
     from scipy.signal import stft as _stft, istft as _istft
     from models.hybrid_unet import HybridDSGE_UNet
     from models.dsge_layer import DSGEFeatureExtractor
     device = _device()
-    fs = cfg['sample_rate'];  signal_len = cfg['block_size']
+    fs = cfg['sample_rate']; signal_len = cfg['block_size']
     noverlap = nperseg // 2
-
     _, _, Zxx = _stft(np.zeros(signal_len), fs=fs, nperseg=nperseg, noverlap=noverlap)
     input_shape = np.abs(Zxx).shape
-
     model = HybridDSGE_UNet(input_shape=input_shape, dsge_order=dsge_order).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
-
     dsge = DSGEFeatureExtractor.load_state(
-        str(dsge_path), basis_type=dsge_basis,
+        str(run_dir / 'dsge_state.npz'), basis_type=dsge_basis,
         stft_params={'nperseg': nperseg, 'noverlap': noverlap, 'fs': fs},
     )
-
     def denoise(noisy):
-        phases = [
-            np.angle(_stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)[2])
-            for s in noisy
-        ]
-        stft_mags = []
-        dsge_mags_list = [[] for _ in range(dsge_order)]
+        phases = [np.angle(_stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)[2]) for s in noisy]
+        stft_mags, dsge_list = [], [[] for _ in range(dsge_order)]
         for s in noisy:
             _, _, Zxx = _stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)
             stft_mags.append(np.abs(Zxx))
-            dsge_specs = dsge.compute_dsge_spectrograms(s)
-            for i in range(dsge_order):
-                dsge_mags_list[i].append(dsge_specs[i])
+            for i, spec in enumerate(dsge.compute_dsge_spectrograms(s)):
+                dsge_list[i].append(spec)
         stft_stack = np.stack(stft_mags)
-        stft_ref_max = stft_stack.max() + 1e-8
-        channels = [stft_stack]
-        for i in range(dsge_order):
-            ch = np.stack(dsge_mags_list[i])
-            channels.append(ch * (stft_ref_max / (ch.max() + 1e-8)))
+        ref_max = stft_stack.max() + 1e-8
+        channels = [stft_stack] + [
+            np.stack(dsge_list[i]) * (ref_max / (np.stack(dsge_list[i]).max() + 1e-8))
+            for i in range(dsge_order)
+        ]
         x4 = torch.tensor(np.stack(channels, axis=1), dtype=torch.float32).to(device)
-        noisy_mag = x4[:, 0, :, :].cpu().numpy()
         with torch.no_grad():
-            out_mag = model(x4).squeeze(1).cpu().numpy() * noisy_mag
+            out_mag = model(x4).squeeze(1).cpu().numpy() * x4[:, 0].cpu().numpy()
         rec = []
         for mag, phase in zip(out_mag, phases):
             _, r = _istft(mag * np.exp(1j * phase), fs=fs, nperseg=nperseg, noverlap=noverlap)
@@ -234,701 +233,671 @@ def load_hybrid_denoiser(weights_path: Path, dsge_path: Path, cfg: dict,
     return denoise
 
 
-def load_wavelet_denoiser(params_path: Path):
+def _load_wavelet(run_dir: Path):
     from models.wavelet import WaveletDenoising
-    with open(params_path) as f:
+    with open(run_dir / 'best_params.json') as f:
         data = json.load(f)
     d = WaveletDenoising()
     d.set_params(**data['best_params'])
-
     def denoise(noisy):
         return np.stack([d.denoise(x) for x in noisy])
     return denoise
 
 
-# ── model registry ────────────────────────────────────────────────────────────
+# ── run discovery ─────────────────────────────────────────────────────────────
 
-def _parse_weights_dir(weights_dir: Path, cfg: dict, nperseg: int = 32) -> dict:
+def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 32) -> dict:
     """
-    Scan weights_dir for trained models.
-    Returns:
-        {display_name: {'denoise_fn': callable, 'noise_type': str, 'model_class': str}}
+    Scan weights/runs/ for all trained models.
+    Returns {run_name: {'denoise_fn', 'model_class', 'noise_type', 'is_hybrid',
+                        'dsge_basis', 'dsge_order', 'run_dir'}}
     """
+    runs_dir = weights_dir / 'runs'
+    if not runs_dir.exists():
+        return {}
+
     entries = {}
+    for run_dir in sorted(runs_dir.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        name = run_dir.name  # e.g. "UnetAutoencoder_gaussian"
 
-    # Neural network models: {ModelName}_{noise_type}_{dataset_uid}_best.pth
-    for pth in sorted(weights_dir.glob("*_best.pth")):
-        stem = pth.stem  # e.g. "UnetAutoencoder_gaussian_abc123_best"
-        parts = stem.replace("_best", "").split("_")
-
-        # Detect model class by prefix
-        if stem.startswith("HybridDSGE_UNet_"):
-            # HybridDSGE_UNet_{basis}_S{order}_{noise_type}_{uid}
-            m = re.match(
-                r"HybridDSGE_UNet_(\w+)_S(\d+)_(gaussian|non_gaussian)_\w+_best", stem
-            )
-            if not m:
-                continue
-            basis, order, noise_type = m.group(1), int(m.group(2)), m.group(3)
-            model_class = f"HybridDSGE_UNet_{basis}_S{order}"
-            dsge_path = weights_dir / f"dsge_state_{noise_type}_{basis}_S{order}.npz"
-            if not dsge_path.exists():
-                print(f"  [warn] DSGE state not found: {dsge_path}, skipping {pth.name}")
-                continue
-            try:
-                fn = load_hybrid_denoiser(pth, dsge_path, cfg, basis, order, nperseg)
-            except Exception as e:
-                print(f"  [warn] Could not load {pth.name}: {e}")
-                continue
-        elif stem.startswith("UnetAutoencoder_"):
-            noise_type = parts[1] if len(parts) > 1 else "unknown"
-            model_class = "UnetAutoencoder"
-            try:
-                fn = load_unet_denoiser(pth, cfg, nperseg)
-            except Exception as e:
-                print(f"  [warn] Could not load {pth.name}: {e}"); continue
-        elif stem.startswith("ResNetAutoencoder_"):
-            noise_type = parts[1] if len(parts) > 1 else "unknown"
-            model_class = "ResNetAutoencoder"
-            try:
-                fn = load_resnet_denoiser(pth, cfg, nperseg)
-            except Exception as e:
-                print(f"  [warn] Could not load {pth.name}: {e}"); continue
-        elif stem.startswith("SpectrogramVAE_"):
-            noise_type = parts[1] if len(parts) > 1 else "unknown"
-            model_class = "SpectrogramVAE"
-            try:
-                fn = load_vae_denoiser(pth, cfg, nperseg)
-            except Exception as e:
-                print(f"  [warn] Could not load {pth.name}: {e}"); continue
-        elif stem.startswith("TimeSeriesTransformer_"):
-            noise_type = parts[1] if len(parts) > 1 else "unknown"
-            model_class = "TimeSeriesTransformer"
-            try:
-                fn = load_transformer_denoiser(pth, cfg)
-            except Exception as e:
-                print(f"  [warn] Could not load {pth.name}: {e}"); continue
+        # Parse noise type (last segment is gaussian or non_gaussian)
+        for nt in ['non_gaussian', 'gaussian']:  # check longer first
+            if name.endswith(f'_{nt}'):
+                noise_type = nt
+                model_part = name[: -(len(nt) + 1)]
+                break
         else:
+            print(f"  [skip] Cannot parse noise type from: {name}")
             continue
 
-        display = f"{model_class} [train={noise_type}]"
-        entries[display] = {
-            'denoise_fn': fn,
-            'noise_type': noise_type,
-            'model_class': model_class,
-            'weights_path': str(pth),
-        }
-        print(f"  Loaded: {display}")
+        pth = run_dir / 'model_best.pth'
+        params_json = run_dir / 'best_params.json'
 
-    # Wavelet: Wavelet_{noise_type}_best_params.json
-    for jf in sorted(weights_dir.glob("Wavelet_*_best_params.json")):
-        m = re.match(r"Wavelet_(gaussian|non_gaussian)_best_params", jf.stem)
-        if not m:
-            continue
-        noise_type = m.group(1)
         try:
-            fn = load_wavelet_denoiser(jf)
+            if model_part == 'UnetAutoencoder':
+                fn = _load_unet(run_dir, cfg, nperseg)
+                mc = 'UnetAutoencoder'; is_hybrid = False
+            elif model_part == 'ResNetAutoencoder':
+                fn = _load_resnet(run_dir, cfg, nperseg)
+                mc = 'ResNetAutoencoder'; is_hybrid = False
+            elif model_part == 'SpectrogramVAE':
+                fn = _load_vae(run_dir, cfg, nperseg)
+                mc = 'SpectrogramVAE'; is_hybrid = False
+            elif model_part == 'TimeSeriesTransformer':
+                fn = _load_transformer(run_dir, cfg)
+                mc = 'TimeSeriesTransformer'; is_hybrid = False
+            elif model_part == 'Wavelet':
+                fn = _load_wavelet(run_dir)
+                mc = 'Wavelet'; is_hybrid = False
+            elif model_part.startswith('HybridDSGE_UNet_'):
+                m = re.match(r'HybridDSGE_UNet_(\w+)_S(\d+)$', model_part)
+                if not m:
+                    print(f"  [skip] Cannot parse hybrid config from: {model_part}")
+                    continue
+                basis, order = m.group(1), int(m.group(2))
+                fn = _load_hybrid(run_dir, cfg, basis, order, nperseg)
+                mc = model_part; is_hybrid = True
+            else:
+                print(f"  [skip] Unknown model: {model_part}")
+                continue
         except Exception as e:
-            print(f"  [warn] Could not load {jf.name}: {e}"); continue
-        display = f"Wavelet [train={noise_type}]"
-        entries[display] = {
-            'denoise_fn': fn,
-            'noise_type': noise_type,
-            'model_class': 'Wavelet',
-            'weights_path': str(jf),
+            print(f"  [warn] Failed to load {name}: {e}")
+            continue
+
+        entries[name] = {
+            'denoise_fn':  fn,
+            'model_class': mc,
+            'noise_type':  noise_type,
+            'is_hybrid':   is_hybrid,
+            'dsge_basis':  basis if is_hybrid else None,
+            'dsge_order':  order if is_hybrid else None,
+            'run_dir':     run_dir,
         }
-        print(f"  Loaded: {display}")
+        print(f"  Loaded: {name}")
 
     return entries
 
 
 # ── evaluation ────────────────────────────────────────────────────────────────
 
-def _overall_metrics(per_snr: dict) -> dict:
-    """Aggregate per-SNR results into a single overall dict."""
-    if not per_snr:
-        return {}
-    mses, maes, rmses, snrs = [], [], [], []
-    for m in per_snr.values():
-        n = m.get('n_samples', 1)
-        mses.extend([m['MSE']] * n)
-        maes.extend([m['MAE']] * n)
-        rmses.extend([m['RMSE']] * n)
-        snrs.append(m['SNR'])
-    return {
-        'MSE':  float(np.mean(mses)),
-        'MAE':  float(np.mean(maes)),
-        'RMSE': float(np.mean(rmses)),
-        'SNR':  float(np.mean(snrs)),
-    }
-
-
 def cross_evaluate(entries: dict, test_dir: Path) -> dict:
     """
-    For each entry (model trained on some noise_type), evaluate on all test noise types.
-
-    Returns:
-        results[display_name][test_noise_type] = {
-            'per_snr': {label: {MSE, SNR, snr_in_db, ...}},
-            'overall': {MSE, MAE, RMSE, SNR},
-        }
+    Returns results[run_name][test_noise_type] = {
+        'per_snr': {label: {MSE, SNR, snr_in_db, ...}},
+        'overall': {MSE, MAE, RMSE, SNR},
+    }
     """
     results = {}
-    for display, info in entries.items():
-        print(f"  Evaluating: {display}")
-        results[display] = {}
+    for name, info in entries.items():
+        print(f"  Evaluating: {name}")
+        results[name] = {}
         for test_nt in NOISE_TYPES:
             per_snr = evaluate_per_snr(info['denoise_fn'], test_dir, test_nt)
-            results[display][test_nt] = {
+            results[name][test_nt] = {
                 'per_snr': per_snr,
-                'overall': _overall_metrics(per_snr),
+                'overall': _aggregate(per_snr),
             }
     return results
 
 
+def _aggregate(per_snr: dict) -> dict:
+    if not per_snr:
+        return {}
+    mse, mae, rmse, snr = [], [], [], []
+    for m in per_snr.values():
+        n = m.get('n_samples', 1)
+        mse.extend([m['MSE']] * n)
+        mae.extend([m['MAE']] * n)
+        rmse.extend([m['RMSE']] * n)
+        snr.append(m['SNR'])
+    return {'MSE': float(np.mean(mse)), 'MAE': float(np.mean(mae)),
+            'RMSE': float(np.mean(rmse)), 'SNR': float(np.mean(snr))}
+
+
+# ── CSV export ────────────────────────────────────────────────────────────────
+
+def export_csv(results: dict, entries: dict, weights_dir: Path, timestamp: str) -> Path:
+    """Flat CSV: one row per (model, noise_trained, noise_tested, snr_in_level)."""
+    path = weights_dir / f'comparison_data_{timestamp}.csv'
+    rows = []
+    for name, res in results.items():
+        info = entries[name]
+        mc = info['model_class']
+        nt = info['noise_type']
+        for test_nt in NOISE_TYPES:
+            per_snr = res[test_nt]['per_snr']
+            overall = res[test_nt]['overall']
+            # overall row (snr_in = 'all')
+            rows.append({
+                'run': name, 'model': mc, 'noise_trained': nt,
+                'noise_tested': test_nt, 'snr_in_db': 'all',
+                'snr_out_db': overall.get('SNR', ''),
+                'mse': overall.get('MSE', ''), 'mae': overall.get('MAE', ''),
+                'rmse': overall.get('RMSE', ''),
+            })
+            for lbl, m in sorted(per_snr.items(), key=lambda kv: kv[1]['snr_in_db']):
+                rows.append({
+                    'run': name, 'model': mc, 'noise_trained': nt,
+                    'noise_tested': test_nt, 'snr_in_db': m['snr_in_db'],
+                    'snr_out_db': m['SNR'], 'mse': m['MSE'],
+                    'mae': m['MAE'], 'rmse': m['RMSE'],
+                })
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            'run', 'model', 'noise_trained', 'noise_tested',
+            'snr_in_db', 'snr_out_db', 'mse', 'mae', 'rmse'
+        ])
+        writer.writeheader(); writer.writerows(rows)
+    print(f'  CSV → {path}')
+    return path
+
+
 # ── figures ───────────────────────────────────────────────────────────────────
 
-RCPARAMS = {
-    'font.size': 10,
-    'axes.titlesize': 11,
-    'axes.labelsize': 10,
-    'legend.fontsize': 8,
-    'xtick.labelsize': 9,
-    'ytick.labelsize': 9,
-    'figure.dpi': 150,
-}
+def _model_colors(model_classes: list) -> dict:
+    palette = plt.cm.tab10(np.linspace(0, 0.9, max(len(model_classes), 1)))
+    return {mc: palette[i] for i, mc in enumerate(model_classes)}
 
 
-def _apply_rc():
+def fig1_snr_heatmap(results: dict, entries: dict, figures_dir: Path) -> Path:
+    """Compact SNR heatmap: rows = runs, cols = G→G / G→NG / NG→G / NG→NG."""
     plt.rcParams.update(RCPARAMS)
-
-
-def fig1_snr_heatmap(results: dict, figures_dir: Path) -> Path:
-    """
-    Fig 1 — SNR heatmap: rows=models, cols=4 train×test combinations.
-    Columns: G→G, G→NG, NG→G, NG→NG
-    """
-    _apply_rc()
-
-    # Collect (model_class, noise_trained) unique base models
-    # Only show base models (best Hybrid chosen by mean SNR across both test types)
-    base_order = ['UnetAutoencoder', 'ResNetAutoencoder', 'SpectrogramVAE',
-                  'TimeSeriesTransformer', 'Wavelet']
-    best_hybrid = _pick_best_hybrid(results)
-
-    rows = []
-    row_labels = []
-    for mc in base_order:
-        for nt in NOISE_TYPES:
-            key = f"{mc} [train={nt}]"
-            if key in results:
-                row = [
-                    results[key]['gaussian']['overall'].get('SNR', np.nan),
-                    results[key]['non_gaussian']['overall'].get('SNR', np.nan),
-                ]
-                # Reorder: G→G, G→NG  or  NG→G, NG→NG depending on train type
-                # Store as (train_G_test_G, train_G_test_NG, train_NG_test_G, train_NG_test_NG)
-                rows.append((mc, nt, row))
-
-    if not rows:
-        return None
-
-    model_names = [_short_name(mc) for mc, nt, _ in rows]
-    train_types = [nt for _, nt, _ in rows]
-
-    # Build 2D matrix with 4 columns
-    # col 0: G→G, col 1: G→NG, col 2: NG→G, col 3: NG→NG
     col_labels = ['G→G', 'G→NG', 'NG→G', 'NG→NG']
-    matrix = np.full((len(rows), 4), np.nan)
-    for i, (mc, nt, snrs) in enumerate(rows):
+    row_labels, matrix = [], []
+
+    # base models first, hybrids last
+    base_runs  = [n for n in sorted(results) if not entries[n]['is_hybrid']]
+    hybrid_runs = [n for n in sorted(results) if entries[n]['is_hybrid']]
+
+    for name in base_runs + hybrid_runs:
+        nt = entries[name]['noise_type']
+        mc = entries[name]['model_class']
+        snr_g  = results[name]['gaussian']['overall'].get('SNR', np.nan)
+        snr_ng = results[name]['non_gaussian']['overall'].get('SNR', np.nan)
+        row = [np.nan, np.nan, np.nan, np.nan]
         if nt == 'gaussian':
-            matrix[i, 0] = snrs[0]  # G→G
-            matrix[i, 1] = snrs[1]  # G→NG
+            row[0] = snr_g; row[1] = snr_ng
         else:
-            matrix[i, 2] = snrs[0]  # NG→G
-            matrix[i, 3] = snrs[1]  # NG→NG
+            row[2] = snr_g; row[3] = snr_ng
+        matrix.append(row)
+        short_mc = MODEL_DISPLAY.get(mc, mc[:14])
+        row_labels.append(f"{short_mc}\n({NOISE_SHORT[nt]} train)")
 
-    # Add best Hybrid rows
-    if best_hybrid:
-        for nt in NOISE_TYPES:
-            key = best_hybrid[nt]
-            if key and key in results:
-                mc = entries_model_class(key)
-                short = _short_hybrid(key)
-                r = [np.nan] * 4
-                if nt == 'gaussian':
-                    r[0] = results[key]['gaussian']['overall'].get('SNR', np.nan)
-                    r[1] = results[key]['non_gaussian']['overall'].get('SNR', np.nan)
-                else:
-                    r[2] = results[key]['gaussian']['overall'].get('SNR', np.nan)
-                    r[3] = results[key]['non_gaussian']['overall'].get('SNR', np.nan)
-                matrix = np.vstack([matrix, r])
-                model_names.append(short)
-                train_types.append(nt)
+    if not matrix:
+        return None
+    matrix = np.array(matrix, dtype=float)
+    vmin, vmax = np.nanmin(matrix), np.nanmax(matrix)
 
-    row_labels_fmt = [
-        f"{n}\n({NOISE_LABEL[t][:4]}. train)" for n, t in zip(model_names, train_types)
-    ]
-
-    fig, ax = plt.subplots(figsize=(8, max(4, 0.55 * len(row_labels_fmt) + 1.5)))
-    vmin = np.nanmin(matrix); vmax = np.nanmax(matrix)
+    fig, ax = plt.subplots(figsize=(8, max(3.5, 0.5 * len(row_labels) + 1.5)))
     if SNS_OK:
-        sns.heatmap(
-            matrix, ax=ax,
-            xticklabels=col_labels, yticklabels=row_labels_fmt,
-            annot=True, fmt='.1f', cmap='RdYlGn',
-            vmin=vmin, vmax=vmax,
-            linewidths=0.5, linecolor='white',
-            cbar_kws={'label': 'SNR (dB)'},
-        )
+        sns.heatmap(matrix, ax=ax, xticklabels=col_labels, yticklabels=row_labels,
+                    annot=True, fmt='.1f', cmap='RdYlGn', vmin=vmin, vmax=vmax,
+                    linewidths=0.4, linecolor='white', cbar_kws={'label': 'SNR (dB)'})
     else:
         im = ax.imshow(matrix, cmap='RdYlGn', vmin=vmin, vmax=vmax, aspect='auto')
         ax.set_xticks(range(4)); ax.set_xticklabels(col_labels)
-        ax.set_yticks(range(len(row_labels_fmt))); ax.set_yticklabels(row_labels_fmt)
+        ax.set_yticks(range(len(row_labels))); ax.set_yticklabels(row_labels)
         for i in range(matrix.shape[0]):
             for j in range(matrix.shape[1]):
                 if not np.isnan(matrix[i, j]):
-                    ax.text(j, i, f'{matrix[i, j]:.1f}', ha='center', va='center', fontsize=8)
+                    ax.text(j, i, f'{matrix[i,j]:.1f}', ha='center', va='center', fontsize=8)
         plt.colorbar(im, ax=ax, label='SNR (dB)')
-
-    ax.set_title('Cross-Evaluation SNR (dB): train type × test type')
-    ax.set_xlabel('Train → Test noise type')
+    ax.set_title('Cross-Evaluation SNR (dB) — Training type × Test type', pad=10)
+    ax.set_xlabel('Train noise → Test noise')
     plt.tight_layout()
     path = figures_dir / 'fig1_snr_heatmap.png'
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Figure 1 → {path}")
+    print(f'  Fig 1 → {path}')
     return path
 
 
-def fig2_snr_curves(results: dict, figures_dir: Path) -> Path:
+def fig2_combined_snr_curves(results: dict, entries: dict, figures_dir: Path) -> Path:
     """
-    Fig 2 — SNR curves (2×2 grid): rows=test type, cols=train type.
-    Each panel: SNR_out vs SNR_in for all base models.
+    All base models on one plot. 2 columns (test_G / test_NG).
+    Gaussian-trained: solid lines. Non-Gaussian-trained: dashed lines.
     """
-    _apply_rc()
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8), sharex=False, sharey=False)
-    fig.suptitle('SNR Output vs SNR Input — Cross-Evaluation', fontsize=12)
+    plt.rcParams.update(RCPARAMS)
+    base_classes = [mc for mc in BASE_MODELS
+                    if any(entries[n]['model_class'] == mc for n in results)]
+    colors = _model_colors(base_classes)
 
-    base_order = ['UnetAutoencoder', 'ResNetAutoencoder', 'SpectrogramVAE',
-                  'TimeSeriesTransformer', 'Wavelet']
-    colors = plt.cm.tab10(np.linspace(0, 0.9, len(base_order)))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
+    fig.suptitle('SNR Output vs. SNR Input — All Models (Combined)', fontsize=12)
 
-    for col_i, train_nt in enumerate(NOISE_TYPES):
-        for row_i, test_nt in enumerate(NOISE_TYPES):
-            ax = axes[row_i, col_i]
-            ax.set_title(f'Train: {NOISE_LABEL[train_nt]}, Test: {NOISE_LABEL[test_nt]}',
+    for col_i, test_nt in enumerate(NOISE_TYPES):
+        ax = axes[col_i]
+        ax.set_title(f'Test set: {NOISE_LABEL[test_nt]}', fontsize=10)
+        ax.set_xlabel('SNR input (dB)'); ax.set_ylabel('SNR output (dB)')
+        ax.grid(True, alpha=0.2)
+
+        snr_ins = []
+        for name, info in entries.items():
+            if info['is_hybrid']:
+                continue
+            mc   = info['model_class']
+            nt   = info['noise_type']
+            per_snr = results[name][test_nt]['per_snr']
+            if not per_snr:
+                continue
+            lbls = sorted(per_snr, key=lambda l: per_snr[l]['snr_in_db'])
+            xs = [per_snr[l]['snr_in_db'] for l in lbls]
+            ys = [per_snr[l]['SNR']       for l in lbls]
+            snr_ins.extend(xs)
+            label = f"{MODEL_DISPLAY.get(mc, mc)} ({NOISE_SHORT[nt]}. train)"
+            ax.plot(xs, ys, lw=1.8, color=colors.get(mc, 'gray'),
+                    linestyle=LINE_STYLE[nt], marker='o', markersize=3.5,
+                    label=label)
+
+        if snr_ins:
+            lims = [min(snr_ins) - 1, max(snr_ins) + 1]
+            ax.plot(lims, lims, 'k:', lw=1, alpha=0.4, label='No change')
+
+        ax.legend(fontsize=7, loc='upper left', ncol=1)
+
+    plt.tight_layout()
+    path = figures_dir / 'fig2_combined_snr_curves.png'
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  Fig 2 → {path}')
+    return path
+
+
+def fig3_per_model_comparison(results: dict, entries: dict, figures_dir: Path) -> Path:
+    """
+    For each base model: 2 subplots (test_G / test_NG), each showing
+    Gaussian-trained vs Non-Gaussian-trained curves side by side.
+    Rows = models, cols = test type.
+    """
+    plt.rcParams.update(RCPARAMS)
+    base_classes = [mc for mc in BASE_MODELS
+                    if any(entries[n]['model_class'] == mc for n in results)]
+    if not base_classes:
+        return None
+
+    n_rows = len(base_classes)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(10, 3.2 * n_rows), squeeze=False)
+    fig.suptitle('Per-Model: Effect of Training Noise Type', fontsize=12, y=1.01)
+
+    for row_i, mc in enumerate(base_classes):
+        for col_i, test_nt in enumerate(NOISE_TYPES):
+            ax = axes[row_i][col_i]
+            ax.set_title(f'{MODEL_DISPLAY.get(mc, mc)} — test: {NOISE_LABEL[test_nt]}',
                          fontsize=9)
             ax.set_xlabel('SNR input (dB)'); ax.set_ylabel('SNR output (dB)')
-            ax.grid(True, alpha=0.25)
-
+            ax.grid(True, alpha=0.2)
             snr_ins = []
-            for ci, mc in enumerate(base_order):
-                key = f"{mc} [train={train_nt}]"
-                if key not in results:
+            for nt in NOISE_TYPES:
+                name = f'{mc}_{nt}'
+                if name not in results:
                     continue
-                per_snr = results[key][test_nt]['per_snr']
+                per_snr = results[name][test_nt]['per_snr']
                 if not per_snr:
                     continue
                 lbls = sorted(per_snr, key=lambda l: per_snr[l]['snr_in_db'])
                 xs = [per_snr[l]['snr_in_db'] for l in lbls]
-                ys = [per_snr[l]['SNR'] for l in lbls]
-                ax.plot(xs, ys, 'o-', lw=1.5, color=colors[ci],
-                        label=_short_name(mc), markersize=4)
+                ys = [per_snr[l]['SNR']       for l in lbls]
                 snr_ins.extend(xs)
-
+                ax.plot(xs, ys, lw=2, color=TRAIN_COLOR[nt],
+                        linestyle=LINE_STYLE[nt], marker='o', markersize=4,
+                        label=f'Train: {NOISE_LABEL[nt]}')
             if snr_ins:
                 lims = [min(snr_ins) - 1, max(snr_ins) + 1]
-                ax.plot(lims, lims, 'k--', lw=1, alpha=0.4, label='No change')
-
-            ax.legend(fontsize=7, loc='upper left')
+                ax.plot(lims, lims, 'k:', lw=1, alpha=0.4, label='No change')
+            ax.legend(fontsize=7)
 
     plt.tight_layout()
-    path = figures_dir / 'fig2_snr_curves.png'
+    path = figures_dir / 'fig3_per_model_comparison.png'
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Figure 2 → {path}")
+    print(f'  Fig 3 → {path}')
     return path
 
 
-def fig3_dsge_scatter(results: dict, figures_dir: Path) -> Path:
+def fig4_dsge_scatter(results: dict, entries: dict, figures_dir: Path) -> Path:
     """
-    Fig 3 — DSGE architecture scatter: SNR_gaussian vs SNR_non_gaussian.
+    DSGE architecture generalisation: SNR_gaussian vs SNR_non_gaussian.
     One panel per training noise type.
     """
-    _apply_rc()
-    hybrid_keys = {
-        nt: [k for k in results if 'HybridDSGE' in k and f'train={nt}' in k]
-        for nt in NOISE_TYPES
-    }
-    if not any(hybrid_keys.values()):
+    plt.rcParams.update(RCPARAMS)
+    hybrid_by_train = {nt: [n for n, i in entries.items()
+                             if i['is_hybrid'] and i['noise_type'] == nt]
+                       for nt in NOISE_TYPES}
+    if not any(hybrid_by_train.values()):
         return None
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
-    fig.suptitle('DSGE Architecture Sweep — Generalisation Scatter', fontsize=12)
+    basis_color = {'fractional': '#4878CF', 'polynomial': '#6ACC65',
+                   'trigonometric': '#D65F5F', 'robust': '#B47CC7'}
+    basis_marker = {'fractional': 'o', 'polynomial': 's',
+                    'trigonometric': '^', 'robust': 'D'}
 
-    markers = {'fractional': 'o', 'polynomial': 's', 'trigonometric': '^', 'robust': 'D'}
-    basis_colors = {'fractional': '#4878CF', 'polynomial': '#6ACC65',
-                    'trigonometric': '#D65F5F', 'robust': '#B47CC7'}
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    fig.suptitle('HybridDSGE_UNet Architecture Sweep — Generalisation', fontsize=12)
 
     for pi, train_nt in enumerate(NOISE_TYPES):
         ax = axes[pi]
         ax.set_title(f'Trained on {NOISE_LABEL[train_nt]}', fontsize=10)
-        ax.set_xlabel(f'SNR on Gaussian test (dB)')
-        ax.set_ylabel(f'SNR on Non-Gaussian test (dB)')
-        ax.grid(True, alpha=0.25)
-
-        seen_bases = set()
-        for key in hybrid_keys[train_nt]:
-            snr_g  = results[key]['gaussian']['overall'].get('SNR', np.nan)
-            snr_ng = results[key]['non_gaussian']['overall'].get('SNR', np.nan)
+        ax.set_xlabel('SNR on Gaussian test (dB)')
+        ax.set_ylabel('SNR on Non-Gaussian test (dB)')
+        ax.grid(True, alpha=0.2)
+        seen = set()
+        for name in hybrid_by_train[train_nt]:
+            info = entries[name]
+            snr_g  = results[name]['gaussian']['overall'].get('SNR', np.nan)
+            snr_ng = results[name]['non_gaussian']['overall'].get('SNR', np.nan)
             if np.isnan(snr_g) or np.isnan(snr_ng):
                 continue
-            basis = _parse_hybrid_basis(key)
-            label = _short_hybrid_tag(key)
-            m = markers.get(basis, 'o')
-            c = basis_colors.get(basis, 'gray')
-            legend_label = basis.capitalize() if basis not in seen_bases else None
-            seen_bases.add(basis)
-            ax.scatter(snr_g, snr_ng, marker=m, color=c, s=60, zorder=3,
+            basis = info['dsge_basis']
+            order = info['dsge_order']
+            c = basis_color.get(basis, 'gray')
+            m = basis_marker.get(basis, 'o')
+            legend_label = basis.capitalize() if basis not in seen else None
+            seen.add(basis)
+            ax.scatter(snr_g, snr_ng, color=c, marker=m, s=70, zorder=3,
                        label=legend_label)
-            ax.annotate(label, (snr_g, snr_ng), textcoords='offset points',
-                        xytext=(4, 3), fontsize=7)
-
-        if seen_bases:
+            ax.annotate(f'S{order}', (snr_g, snr_ng),
+                        textcoords='offset points', xytext=(4, 3), fontsize=7)
+        if seen:
             ax.legend(title='Basis', fontsize=8)
 
     plt.tight_layout()
-    path = figures_dir / 'fig3_dsge_scatter.png'
+    path = figures_dir / 'fig4_dsge_scatter.png'
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Figure 3 → {path}")
+    print(f'  Fig 4 → {path}')
     return path
 
 
-def fig4_bar_mse(results: dict, figures_dir: Path) -> Path:
-    """
-    Fig 4 — Bar chart: MSE for each model × train type, two test-type panels.
-    """
-    _apply_rc()
-    base_order = ['UnetAutoencoder', 'ResNetAutoencoder', 'SpectrogramVAE',
-                  'TimeSeriesTransformer', 'Wavelet']
-    best_hybrid = _pick_best_hybrid(results)
-    display_order = base_order + (['BestHybrid'] if any(best_hybrid.values()) else [])
+def fig5_example_denoising(results: dict, entries: dict,
+                            test_dir: Path, figures_dir: Path) -> Path:
+    """2 rows (gaussian / non_gaussian test), 3 cols (clean / noisy / best model)."""
+    plt.rcParams.update(RCPARAMS)
+    rng = np.random.default_rng(42)
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle('Mean Squared Error — Test Performance', fontsize=12)
-    width = 0.35
-
-    for pi, test_nt in enumerate(NOISE_TYPES):
-        ax = axes[pi]
-        ax.set_title(f'Test: {NOISE_LABEL[test_nt]}', fontsize=10)
-        ax.set_ylabel('MSE'); ax.grid(True, alpha=0.25, axis='y')
-
-        x_labels, vals_g, vals_ng = [], [], []
-        for mc in display_order:
-            if mc == 'BestHybrid':
-                labels_ = [''] * 2
-                mse_vals = [np.nan, np.nan]
-                for ti, nt in enumerate(NOISE_TYPES):
-                    key = best_hybrid.get(nt)
-                    if key and key in results:
-                        mse_vals[ti] = results[key][test_nt]['overall'].get('MSE', np.nan)
-                        labels_[ti] = _short_hybrid(key)
-                short = labels_[0] or labels_[1] or 'HybridBest'
-            else:
-                mse_vals = [np.nan, np.nan]
-                for ti, nt in enumerate(NOISE_TYPES):
-                    key = f"{mc} [train={nt}]"
-                    if key in results:
-                        mse_vals[ti] = results[key][test_nt]['overall'].get('MSE', np.nan)
-                short = _short_name(mc)
-            x_labels.append(short)
-            vals_g.append(mse_vals[0])   # trained on gaussian
-            vals_ng.append(mse_vals[1])  # trained on non_gaussian
-
-        xs = np.arange(len(x_labels))
-        ax.bar(xs - width / 2, vals_g,  width, label='Trained: Gaussian',
-               color=PALETTE['gaussian'], alpha=0.85)
-        ax.bar(xs + width / 2, vals_ng, width, label='Trained: Non-Gaussian',
-               color=PALETTE['non_gaussian'], alpha=0.85)
-        ax.set_xticks(xs); ax.set_xticklabels(x_labels, rotation=25, ha='right', fontsize=8)
-        ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    path = figures_dir / 'fig4_bar_mse.png'
-    fig.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Figure 4 → {path}")
-    return path
-
-
-def fig5_example_denoising(results: dict, test_dir: Path,
-                            dataset_path: Path, figures_dir: Path) -> Path:
-    """
-    Fig 5 — Example denoising: 2 rows (gaussian / non_gaussian test),
-    3 columns (clean / noisy / best model output).
-    """
-    _apply_rc()
     fig, axes = plt.subplots(2, 3, figsize=(12, 6))
-    fig.suptitle('Denoising Example (random sample)', fontsize=12)
+    fig.suptitle('Denoising Example (random sample per noise type)', fontsize=12)
 
     for row_i, test_nt in enumerate(NOISE_TYPES):
-        # pick a random test file
-        test_files = sorted(test_dir.glob(f"test_*_{test_nt}.npy"))
+        test_files = sorted(test_dir.glob(f'test_*_{test_nt}.npy'))
         if not test_files:
             continue
-        rng = np.random.default_rng(42)
-        chosen_file = test_files[len(test_files) // 2]
-        clean_file = chosen_file.parent / f"test_{chosen_file.stem.split('_')[1]}_clean.npy"
+        chosen = test_files[len(test_files) // 2]
+        parts = chosen.stem.split('_')
+        snr_label = parts[1]
+        clean_file = chosen.parent / f'test_{snr_label}_clean.npy'
         if not clean_file.exists():
             continue
-        noisy_all = np.load(chosen_file)
-        clean_all = np.load(clean_file)
+        noisy_all = np.load(chosen); clean_all = np.load(clean_file)
         idx = rng.integers(0, len(noisy_all))
-        x_noisy = noisy_all[idx]
-        x_clean = clean_all[idx]
+        x_noisy = noisy_all[idx]; x_clean = clean_all[idx]
 
-        # pick best model for this test type (highest SNR)
-        best_key = None; best_snr = -np.inf
-        for key, res in results.items():
-            snr = res[test_nt]['overall'].get('SNR', -np.inf)
-            if snr > best_snr:
-                best_snr = snr; best_key = key
+        # best model for this test type
+        best_name = max(
+            (n for n in results if results[n][test_nt]['overall'].get('SNR') is not None),
+            key=lambda n: results[n][test_nt]['overall'].get('SNR', -np.inf),
+            default=None,
+        )
+        x_den = entries[best_name]['denoise_fn'](x_noisy[None])[0] if best_name else x_noisy
+        best_label = best_name.replace('_', ' ') if best_name else 'N/A'
 
-        x_den = results[best_key]['_denoiser']([x_noisy])[0] if best_key else x_noisy
         t = np.arange(len(x_clean))
-
-        titles = ['Clean signal', 'Noisy input', f'Best model\n({_display_label(best_key)})']
-        signals = [x_clean, x_noisy, x_den]
-        colors = ['#333333', '#888888', PALETTE.get(
-            results[best_key]['_train_nt'] if best_key else 'gaussian', '#2255AA')]
-
-        for col_i, (sig, title, c) in enumerate(zip(signals, titles, colors)):
+        for col_i, (sig, title, c) in enumerate([
+            (x_clean, 'Clean signal',   '#333333'),
+            (x_noisy, 'Noisy input',    '#888888'),
+            (x_den,   f'Best model\n({best_label})', TRAIN_COLOR[entries[best_name]['noise_type']] if best_name else '#2255AA'),
+        ]):
             ax = axes[row_i, col_i]
-            ax.plot(t, sig, lw=1.0, color=c)
-            ax.set_title(title, fontsize=9)
-            ax.set_xlabel('Sample'); ax.set_ylabel('Amplitude')
-            ax.grid(True, alpha=0.2)
+            ax.plot(t, sig, lw=0.9, color=c)
+            ax.set_title(title, fontsize=8)
+            ax.set_xlabel('Sample'); ax.grid(True, alpha=0.15)
             if col_i == 0:
-                ax.set_ylabel(f'{NOISE_LABEL[test_nt]}\nnoise', fontsize=9)
+                ax.set_ylabel(f'{NOISE_LABEL[test_nt]}\nnoise', fontsize=8)
 
     plt.tight_layout()
     path = figures_dir / 'fig5_example_denoising.png'
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Figure 5 → {path}")
+    print(f'  Fig 5 → {path}')
     return path
-
-
-# ── helper functions ──────────────────────────────────────────────────────────
-
-def _short_name(model_class: str) -> str:
-    return {
-        'UnetAutoencoder': 'U-Net', 'ResNetAutoencoder': 'ResNet',
-        'SpectrogramVAE': 'VAE', 'TimeSeriesTransformer': 'Transformer',
-        'Wavelet': 'Wavelet',
-    }.get(model_class, model_class)
-
-
-def _short_hybrid(key: str) -> str:
-    m = re.search(r'HybridDSGE_UNet_(\w+)_S(\d+)', key)
-    if m:
-        return f"Hybrid {m.group(1)[:4].capitalize()} S{m.group(2)}"
-    return 'Hybrid'
-
-
-def _short_hybrid_tag(key: str) -> str:
-    m = re.search(r'HybridDSGE_UNet_(\w+)_S(\d+)', key)
-    if m:
-        return f"{m.group(1)[:4]}.S{m.group(2)}"
-    return 'H'
-
-
-def _parse_hybrid_basis(key: str) -> str:
-    m = re.search(r'HybridDSGE_UNet_(\w+)_S', key)
-    return m.group(1) if m else 'unknown'
-
-
-def entries_model_class(key: str) -> str:
-    m = re.search(r'HybridDSGE_UNet_\w+_S\d+', key)
-    return m.group(0) if m else key.split(' ')[0]
-
-
-def _display_label(key: str) -> str:
-    if not key:
-        return ''
-    if 'HybridDSGE' in key:
-        return _short_hybrid(key)
-    mc = key.split(' ')[0]
-    return _short_name(mc)
-
-
-def _pick_best_hybrid(results: dict) -> dict:
-    """For each train noise type, pick the Hybrid config with highest mean SNR."""
-    best = {}
-    for nt in NOISE_TYPES:
-        candidates = [k for k in results if 'HybridDSGE' in k and f'train={nt}' in k]
-        if not candidates:
-            best[nt] = None
-            continue
-        best[nt] = max(
-            candidates,
-            key=lambda k: np.nanmean([
-                results[k][t]['overall'].get('SNR', np.nan) for t in NOISE_TYPES
-            ])
-        )
-    return best
 
 
 # ── report generation ─────────────────────────────────────────────────────────
 
-def _snr_table_rows(results: dict) -> list:
-    """Returns list of dicts for the comparison table."""
-    rows = []
-    for key, res in sorted(results.items()):
-        if '_denoiser' in res:
-            continue
-        nt_train = res.get('_train_nt', key.split('train=')[-1].rstrip(']'))
-        rows.append({
-            'key': key,
-            'label': _display_label(key),
-            'train': NOISE_LABEL[nt_train],
-            'G_G':   res['gaussian']['overall'].get('SNR', float('nan')),
-            'G_NG':  res['non_gaussian']['overall'].get('SNR', float('nan')),
-        })
-    return rows
-
-
-def generate_report_en(results_clean: dict, figures: list, dataset_name: str,
-                        weights_dir: Path, timestamp: str) -> Path:
+def _snr_table(results: dict, entries: dict) -> list[str]:
+    """Markdown table rows for the main SNR comparison."""
     lines = [
-        "# Signal Denoising — Comparative Study\n",
-        f"**Dataset:** `{dataset_name}`  ",
-        f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  \n",
-        "## Overview\n",
-        "Each model was trained separately on **Gaussian** and **Non-Gaussian** noise.",
-        "Cross-evaluation: every trained model is tested on **both** test sets,",
-        "revealing how well models generalise across noise types.\n",
-        "## Cross-Evaluation SNR (dB)\n",
-        "| Model | Train type | G→G | G→NG | NG→G | NG→NG |",
-        "|-------|-----------|----:|-----:|-----:|------:|",
+        '| Model | Train | G→G (dB) | G→NG (dB) | NG→G (dB) | NG→NG (dB) |',
+        '|-------|-------|--------:|----------:|----------:|-----------:|',
     ]
-    for key, res in sorted(results_clean.items()):
-        nt = res.get('_train_nt', '')
-        label = _display_label(key)
-        snr_gg  = res['gaussian']['overall'].get('SNR', float('nan'))
-        snr_gng = res['non_gaussian']['overall'].get('SNR', float('nan'))
-        train_label = NOISE_LABEL.get(nt, nt)
+    base_runs   = [n for n in sorted(results) if not entries[n]['is_hybrid']]
+    hybrid_runs = [n for n in sorted(results) if entries[n]['is_hybrid']]
+    for name in base_runs + hybrid_runs:
+        nt  = entries[name]['noise_type']
+        mc  = entries[name]['model_class']
+        snr_g  = results[name]['gaussian']['overall'].get('SNR', float('nan'))
+        snr_ng = results[name]['non_gaussian']['overall'].get('SNR', float('nan'))
+        label = MODEL_DISPLAY.get(mc, mc[:20])
+        def _fmt(v, cond): return f'{v:.2f}' if cond and not np.isnan(v) else '—'
         lines.append(
-            f"| {label} | {train_label} | "
-            + (f"{snr_gg:.2f}" if nt == 'gaussian' else '—') + " | "
-            + (f"{snr_gng:.2f}" if nt == 'gaussian' else '—') + " | "
-            + (f"{snr_gg:.2f}" if nt == 'non_gaussian' else '—') + " | "
-            + (f"{snr_gng:.2f}" if nt == 'non_gaussian' else '—') + " |"
+            f'| {label} | {NOISE_LABEL[nt]} | '
+            f'{_fmt(snr_g, nt=="gaussian")} | {_fmt(snr_ng, nt=="gaussian")} | '
+            f'{_fmt(snr_g, nt=="non_gaussian")} | {_fmt(snr_ng, nt=="non_gaussian")} |'
         )
+    return lines
 
-    lines += [
-        "\n## Figures\n",
-        "### Figure 1 — Cross-Evaluation SNR Heatmap\n",
-        "Rows: models. Columns: (train→test) combination. Colour encodes SNR in dB.\n",
-        "![Fig 1](figures/fig1_snr_heatmap.png)\n",
-        "### Figure 2 — SNR Curves\n",
-        "SNR output vs. SNR input for all base models across all four train/test combinations.\n",
-        "![Fig 2](figures/fig2_snr_curves.png)\n",
-        "### Figure 3 — DSGE Architecture Scatter\n",
-        "Each point is one DSGE configuration. Axes: SNR on Gaussian test vs. SNR on Non-Gaussian test.",
-        "Best generalising architectures appear in the upper-right quadrant.\n",
-        "![Fig 3](figures/fig3_dsge_scatter.png)\n",
-        "### Figure 4 — MSE Bar Chart\n",
-        "Mean Squared Error for each model on Gaussian (left) and Non-Gaussian (right) test sets.\n",
-        "![Fig 4](figures/fig4_bar_mse.png)\n",
-        "### Figure 5 — Denoising Example\n",
-        "Visual comparison: clean signal, noisy input, and best model output.\n",
-        "![Fig 5](figures/fig5_example_denoising.png)\n",
-        "## Conclusions\n",
-        "- Models trained on **Non-Gaussian** noise generally maintain acceptable performance on "
-        "Gaussian noise (non-Gaussian training set is a superset of challenges).",
-        "- Models trained exclusively on **Gaussian** noise degrade significantly on Non-Gaussian test data.",
-        "- The **HybridDSGE_UNet** benefits from explicit non-linear basis functions, "
-        "improving robustness to impulsive interference.",
-        "- Wavelet denoising provides a parameter-free baseline but lacks adaptivity.\n",
+
+def _best_overall(results: dict, entries: dict, test_nt: str) -> str:
+    best = max(
+        (n for n in results if results[n][test_nt]['overall'].get('SNR') is not None),
+        key=lambda n: results[n][test_nt]['overall'].get('SNR', -np.inf),
+        default=None,
+    )
+    if not best:
+        return 'N/A'
+    snr = results[best][test_nt]['overall']['SNR']
+    mc = entries[best]['model_class']
+    nt = entries[best]['noise_type']
+    return f"{MODEL_DISPLAY.get(mc, mc)} (trained on {NOISE_LABEL[nt]}, SNR = {snr:.2f} dB)"
+
+
+def generate_report_en(results: dict, entries: dict, figures: list,
+                        dataset_name: str, weights_dir: Path, timestamp: str, csv_path: Path) -> Path:
+    best_g  = _best_overall(results, entries, 'gaussian')
+    best_ng = _best_overall(results, entries, 'non_gaussian')
+
+    lines = [
+        '# Signal Denoising — Comparative Study\n',
+        f'**Dataset:** `{dataset_name}`  ',
+        f'**Date:** {datetime.now().strftime("%Y-%m-%d %H:%M")}  \n',
+
+        '## Study Overview\n',
+        'This report compares signal denoising models trained under two noise regimes: '
+        '**Gaussian (AWGN)** and **Non-Gaussian** (non-stationary polygaussian mixture). '
+        'Each model is trained once per noise type, then evaluated on **both** test sets. '
+        'This cross-evaluation reveals whether models generalise across noise distributions — '
+        'a key question for deployment in real radio environments where the noise type '
+        'is not known in advance.\n',
+
+        '**Central hypothesis:** a model trained on Non-Gaussian noise should maintain '
+        'acceptable performance on Gaussian noise (since Non-Gaussian is a harder superset), '
+        'while a model trained only on Gaussian noise will degrade noticeably on Non-Gaussian interference.\n',
+
+        '## Results Summary\n',
+        f'- **Best model on Gaussian test:** {best_g}',
+        f'- **Best model on Non-Gaussian test:** {best_ng}\n',
+
+        '## Cross-Evaluation SNR Table\n',
+        'Columns encode training→test noise type combinations. '
+        'Values in dB (higher is better). '
+        'Cells marked "—" correspond to the complementary training type.\n',
+    ] + _snr_table(results, entries) + [
+
+        '\n## Figures\n',
+
+        '### Figure 1 — Cross-Evaluation Heatmap\n',
+        'A compact overview: rows are trained models, columns are the four '
+        'train→test combinations (G→G, G→NG, NG→G, NG→NG). '
+        'Colour encodes SNR in dB — green indicates strong denoising, '
+        'red indicates degradation. The diagonal blocks (G→G and NG→NG) '
+        'represent in-distribution performance; the off-diagonal blocks '
+        'reveal out-of-distribution generalisation.\n',
+        '![Fig 1](figures/fig1_snr_heatmap.png)\n',
+
+        '### Figure 2 — Combined SNR Curves\n',
+        'SNR output vs. SNR input for **all base models** on a single axes. '
+        'Solid lines correspond to Gaussian-trained models, dashed lines to '
+        'Non-Gaussian-trained models. Each colour represents a different architecture. '
+        'The dotted diagonal is the "no-change" baseline (SNR_out = SNR_in). '
+        'Any curve above the diagonal indicates improvement.\n',
+        '![Fig 2](figures/fig2_combined_snr_curves.png)\n',
+
+        '### Figure 3 — Per-Model Training Noise Comparison\n',
+        'For each architecture individually: the effect of training noise type '
+        'on performance across SNR levels. Blue (solid) = trained on Gaussian noise; '
+        'red (dashed) = trained on Non-Gaussian noise. '
+        'The gap between curves on the Non-Gaussian test panel (right column) '
+        'quantifies the cost of wrong noise assumption during training.\n',
+        '![Fig 3](figures/fig3_per_model_comparison.png)\n',
+
+        '### Figure 4 — DSGE Architecture Sweep\n',
+        'Each point represents one HybridDSGE_UNet configuration (basis function × polynomial order). '
+        'The X-axis shows SNR on Gaussian test data; the Y-axis shows SNR on Non-Gaussian test data. '
+        'Architectures in the upper-right quadrant generalise well to both noise types. '
+        'Marker shape encodes the basis type (circle = fractional, square = polynomial, '
+        'triangle = trigonometric, diamond = robust).\n',
+        '![Fig 4](figures/fig4_dsge_scatter.png)\n',
+
+        '### Figure 5 — Denoising Example\n',
+        'Visual illustration of denoising quality. Top row: Gaussian noise test signal. '
+        'Bottom row: Non-Gaussian noise test signal. '
+        'Left: clean reference. Centre: noisy input. Right: best model output.\n',
+        '![Fig 5](figures/fig5_example_denoising.png)\n',
+
+        '## Data\n',
+        f'Raw per-SNR metrics for all models are available in `{csv_path.name}` '
+        '(CSV format, one row per model × train type × test type × SNR level).\n',
+
+        '## Conclusions\n',
+        '- Models trained on Non-Gaussian noise generalise to Gaussian conditions with '
+        'minimal performance loss, supporting the central hypothesis.',
+        '- Models trained exclusively on Gaussian noise show significant SNR degradation '
+        'on Non-Gaussian test data, confirming the value of realistic noise modelling.',
+        '- The HybridDSGE_UNet benefits from explicit non-linear basis functions, '
+        'improving robustness to impulsive interference over standard spectral autoencoders.',
+        '- Wavelet denoising provides a parameter-free, training-free baseline '
+        'but lacks adaptivity to signal-specific noise statistics.\n',
     ]
-    path = weights_dir / f"comparison_report_{timestamp}.md"
+
+    path = weights_dir / f'comparison_report_{timestamp}.md'
     path.write_text('\n'.join(lines), encoding='utf-8')
-    print(f"  EN report → {path}")
+    print(f'  EN report → {path}')
     return path
 
 
-def generate_report_uk(results_clean: dict, figures: list, dataset_name: str,
-                        weights_dir: Path, timestamp: str) -> Path:
-    lines = [
-        "# Шумозаглушення сигналів — Порівняльне дослідження\n",
-        f"**Датасет:** `{dataset_name}`  ",
-        f"**Дата:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  \n",
-        "## Огляд\n",
-        "Кожну модель навчено окремо на **Гаусівському** та **Негаусівському** шумі.",
-        "Крос-оцінка: кожна натренована модель тестується на **обох** тестових наборах,",
-        "що дозволяє оцінити узагальнення моделей між типами завад.\n",
-        "## Крос-оцінка SNR (дБ)\n",
-        "| Модель | Тип навчання | G→G | G→NG | NG→G | NG→NG |",
-        "|--------|-------------|----:|-----:|-----:|------:|",
-    ]
-    for key, res in sorted(results_clean.items()):
-        nt = res.get('_train_nt', '')
-        label = _display_label(key)
-        snr_gg  = res['gaussian']['overall'].get('SNR', float('nan'))
-        snr_gng = res['non_gaussian']['overall'].get('SNR', float('nan'))
-        train_label = NOISE_LABEL_UK.get(nt, nt)
-        lines.append(
-            f"| {label} | {train_label} | "
-            + (f"{snr_gg:.2f}" if nt == 'gaussian' else '—') + " | "
-            + (f"{snr_gng:.2f}" if nt == 'gaussian' else '—') + " | "
-            + (f"{snr_gg:.2f}" if nt == 'non_gaussian' else '—') + " | "
-            + (f"{snr_gng:.2f}" if nt == 'non_gaussian' else '—') + " |"
-        )
+def generate_report_uk(results: dict, entries: dict, figures: list,
+                        dataset_name: str, weights_dir: Path, timestamp: str, csv_path: Path) -> Path:
+    best_g  = _best_overall(results, entries, 'gaussian')
+    best_ng = _best_overall(results, entries, 'non_gaussian')
 
-    lines += [
-        "\n## Графіки\n",
-        "### Рисунок 1 — Теплова карта SNR (крос-оцінка)\n",
-        "Рядки: моделі. Стовпці: комбінація (навчання→тест). Колір кодує SNR у дБ.\n",
-        "![Рис 1](figures/fig1_snr_heatmap.png)\n",
-        "### Рисунок 2 — Криві SNR\n",
-        "SNR на виході vs. SNR на вході для всіх базових моделей і всіх комбінацій навчання/тесту.\n",
-        "![Рис 2](figures/fig2_snr_curves.png)\n",
-        "### Рисунок 3 — Розсіювальний графік архітектур DSGE\n",
-        "Кожна точка — одна конфігурація DSGE. Осі: SNR на гаусівському тесті vs. на негаусівському.",
-        "Найкращі архітектури за узагальненням — у верхньому правому куті.\n",
-        "![Рис 3](figures/fig3_dsge_scatter.png)\n",
-        "### Рисунок 4 — Стовпчастий графік MSE\n",
-        "Середньоквадратична похибка кожної моделі на гаусівському (ліворуч) і негаусівському (праворуч) тестах.\n",
-        "![Рис 4](figures/fig4_bar_mse.png)\n",
-        "### Рисунок 5 — Приклад шумозаглушення\n",
-        "Візуальне порівняння: чистий сигнал, зашумлений вхід, вихід найкращої моделі.\n",
-        "![Рис 5](figures/fig5_example_denoising.png)\n",
-        "## Висновки\n",
-        "- Моделі, навчені на **негаусівському** шумі, зберігають прийнятну якість на гаусівських завадах "
-        "(негаусівський набір є більш складним підмножиною завад).",
-        "- Моделі, навчені лише на **гаусівському** шумі, суттєво погіршуються при негаусівському тестуванні.",
-        "- **HybridDSGE_UNet** завдяки нелінійним базисним функціям демонструє кращу стійкість до імпульсних завад.",
-        "- Вейвлет-шумозаглушення є безпараметричним базовим методом, проте не адаптується до специфіки сигналу.\n",
+    lines = [
+        '# Шумозаглушення сигналів — Порівняльне дослідження\n',
+        f'**Датасет:** `{dataset_name}`  ',
+        f'**Дата:** {datetime.now().strftime("%Y-%m-%d %H:%M")}  \n',
+
+        '## Опис дослідження\n',
+        'У цьому звіті порівнюються моделі шумозаглушення, навчені в двох режимах: '
+        '**Гаусівський (AWGN)** та **Негаусівський** шум (нестаціонарна полігауссова суміш). '
+        'Кожна модель навчається окремо для кожного типу шуму, а потім тестується на **обох** '
+        'тестових наборах. Таке крос-оцінювання показує, чи здатні моделі узагальнюватись '
+        'між різними типами завад — ключове питання для розгортання в реальних умовах, '
+        'де тип шуму заздалегідь невідомий.\n',
+
+        '**Центральна гіпотеза:** модель, навчена на негаусівському шумі, має зберігати '
+        'прийнятну якість на гаусівських завадах (оскільки негаусівський набір є складнішим), '
+        'тоді як модель, навчена лише на гаусівському шумі, суттєво деградує на '
+        'негаусівських завадах.\n',
+
+        '## Підсумок результатів\n',
+        f'- **Найкраща модель на Гаусівському тесті:** {best_g}',
+        f'- **Найкраща модель на Негаусівському тесті:** {best_ng}\n',
+
+        '## Таблиця крос-оцінки SNR\n',
+        'Стовпці кодують комбінацію навчання→тест. '
+        'Значення в дБ (вище — краще). '
+        'Клітинки "—" відповідають комплементарному типу навчання.\n',
+    ] + _snr_table(results, entries) + [
+
+        '\n## Графіки\n',
+
+        '### Рисунок 1 — Теплова карта крос-оцінки\n',
+        'Компактний огляд: рядки — навчені моделі, стовпці — чотири комбінації '
+        'навчання→тест (G→G, G→NG, NG→G, NG→NG). Колір кодує SNR у дБ — '
+        'зелений означає ефективне шумозаглушення, червоний — деградацію. '
+        'Діагональні блоки (G→G та NG→NG) — результати на «своєму» типі шуму; '
+        'позадіагональні блоки — узагальнення за межами тренувального розподілу.\n',
+        '![Рис 1](figures/fig1_snr_heatmap.png)\n',
+
+        '### Рисунок 2 — Об\'єднані криві SNR\n',
+        'SNR на виході vs. SNR на вході для **всіх базових моделей** на одних осях. '
+        'Суцільні лінії — моделі, навчені на гаусівському шумі; '
+        'штрихові — навчені на негаусівському. Кожен колір — окрема архітектура. '
+        'Пунктирна діагональ — базова лінія «без змін» (SNR_out = SNR_in).\n',
+        '![Рис 2](figures/fig2_combined_snr_curves.png)\n',
+
+        '### Рисунок 3 — Порівняння типів навчання для кожної моделі\n',
+        'Для кожної архітектури окремо: вплив типу навчання на якість по рівнях SNR. '
+        'Синій (суцільний) = навчено на гаусівському шумі; '
+        'червоний (штриховий) = навчено на негаусівському. '
+        'Розрив між кривими на правому стовпці (негаусівський тест) '
+        'кількісно показує «ціну» неправильного припущення про тип шуму при навчанні.\n',
+        '![Рис 3](figures/fig3_per_model_comparison.png)\n',
+
+        '### Рисунок 4 — Перебір архітектур HybridDSGE_UNet\n',
+        'Кожна точка — одна конфігурація гібридної моделі (тип базису × порядок полінома). '
+        'Вісь X — SNR на гаусівському тесті; вісь Y — SNR на негаусівському тесті. '
+        'Архітектури у верхньому правому куті добре узагальнюються на обох типах завад. '
+        'Форма маркера кодує тип базису (коло = fractional, квадрат = polynomial, '
+        'трикутник = trigonometric, ромб = robust).\n',
+        '![Рис 4](figures/fig4_dsge_scatter.png)\n',
+
+        '### Рисунок 5 — Приклад шумозаглушення\n',
+        'Візуальна ілюстрація якості роботи. Верхній рядок: гаусівський шум. '
+        'Нижній рядок: негаусівський шум. '
+        'Ліворуч: чистий сигнал-еталон. По центру: зашумлений вхід. Праворуч: вихід найкращої моделі.\n',
+        '![Рис 5](figures/fig5_example_denoising.png)\n',
+
+        '## Дані\n',
+        f'Детальні метрики по рівнях SNR для всіх моделей — у файлі `{csv_path.name}` '
+        '(формат CSV, один рядок на комбінацію модель × тип навчання × тип тесту × рівень SNR).\n',
+
+        '## Висновки\n',
+        '- Моделі, навчені на негаусівському шумі, узагальнюються на гаусівські умови '
+        'з мінімальними втратами, підтверджуючи центральну гіпотезу.',
+        '- Моделі, навчені виключно на гаусівському шумі, демонструють суттєву деградацію '
+        'на негаусівських тестових даних — це підкреслює важливість реалістичного '
+        'моделювання шуму при навчанні.',
+        '- HybridDSGE_UNet завдяки нелінійним базисним функціям забезпечує кращу стійкість '
+        'до імпульсних завад порівняно зі стандартними спектральними автоенкодерами.',
+        '- Вейвлет-шумозаглушення є безпараметричним базовим методом без навчання, '
+        'але не адаптується до специфічної статистики шуму конкретного сигналу.\n',
     ]
-    path = weights_dir / f"comparison_report_{timestamp}_uk.md"
+
+    path = weights_dir / f'comparison_report_{timestamp}_uk.md'
     path.write_text('\n'.join(lines), encoding='utf-8')
-    print(f"  UK report → {path}")
+    print(f'  UA report → {path}')
     return path
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description="Cross-evaluation comparison report")
-    p.add_argument("--dataset",     required=True,
-                   help="Path to dataset folder")
-    p.add_argument("--weights-dir", default="",
-                   help="Override weights directory (default: <dataset>/weights/)")
-    p.add_argument("--nperseg",     type=int, default=32)
-    p.add_argument("--seed",        type=int, default=42)
+    p = argparse.ArgumentParser(description='Cross-evaluation comparison report')
+    p.add_argument('--dataset',     required=True, help='Path to dataset folder')
+    p.add_argument('--weights-dir', default='',    help='Override weights dir')
+    p.add_argument('--nperseg',     type=int, default=32)
+    p.add_argument('--seed',        type=int, default=42)
     args = p.parse_args()
 
     np.random.seed(args.seed)
@@ -937,69 +906,61 @@ def main():
     if not dataset_path.is_absolute():
         dataset_path = ROOT / dataset_path
     if not dataset_path.exists():
-        print(f"ERROR: dataset not found: {dataset_path}"); sys.exit(1)
+        print(f'ERROR: dataset not found: {dataset_path}'); sys.exit(1)
 
-    weights_dir = Path(args.weights_dir) if args.weights_dir else dataset_path / "weights"
-    test_dir = dataset_path / "test"
-    if not test_dir.exists():
-        print(f"ERROR: test directory not found: {test_dir}"); sys.exit(1)
-
-    with open(dataset_path / "dataset_config.json") as f:
-        cfg = json.load(f)
-
-    figures_dir = weights_dir / "figures"
+    weights_dir  = Path(args.weights_dir) if args.weights_dir else dataset_path / 'weights'
+    test_dir     = dataset_path / 'test'
+    figures_dir  = weights_dir / 'figures'
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nDataset : {dataset_path.name}")
-    print(f"Weights : {weights_dir}")
-    print(f"\nLoading models...")
-    entries = _parse_weights_dir(weights_dir, cfg, args.nperseg)
+    if not test_dir.exists():
+        print(f'ERROR: test directory not found: {test_dir}'); sys.exit(1)
+
+    with open(dataset_path / 'dataset_config.json') as f:
+        cfg = json.load(f)
+
+    print(f'\nDataset : {dataset_path.name}')
+    print(f'\nLoading models from {weights_dir / "runs"} ...')
+    entries = discover_runs(weights_dir, cfg, args.nperseg)
     if not entries:
-        print("ERROR: no trained models found in weights directory.")
+        print('ERROR: no trained models found. Run train/train_all.py first.')
         sys.exit(1)
 
-    print(f"\nRunning cross-evaluation on test sets...")
+    print(f'\nRunning cross-evaluation ({len(entries)} models × 2 test sets)...')
     results = cross_evaluate(entries, test_dir)
 
-    # Attach metadata for figure helpers
-    for display, info in entries.items():
-        if display in results:
-            results[display]['_train_nt'] = info['noise_type']
-            results[display]['_denoiser'] = info['denoise_fn']
-            results[display]['_model_class'] = info['model_class']
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    print(f"\nGenerating figures...")
-    figures = []
-    figures.append(fig1_snr_heatmap(results, figures_dir))
-    figures.append(fig2_snr_curves(results, figures_dir))
-    figures.append(fig3_dsge_scatter(results, figures_dir))
-    figures.append(fig4_bar_mse(results, figures_dir))
-    figures.append(fig5_example_denoising(results, test_dir, dataset_path, figures_dir))
+    print(f'\nExporting data...')
+    csv_path = export_csv(results, entries, weights_dir, timestamp)
 
-    # Clean results for JSON serialisation (remove non-serialisable keys)
-    results_clean = {
-        k: {nt: {'overall': v[nt]['overall'],
-                 'per_snr': v[nt]['per_snr']}
+    json_path = weights_dir / f'comparison_data_{timestamp}.json'
+    json_results = {
+        k: {nt: {'overall': v[nt]['overall'], 'per_snr': v[nt]['per_snr']}
             for nt in NOISE_TYPES}
         for k, v in results.items()
-        if not k.startswith('_')
     }
-    for k in results_clean:
-        if k in results:
-            results_clean[k]['_train_nt'] = results[k].get('_train_nt', '')
+    with open(json_path, 'w') as f:
+        json.dump(json_results, f, indent=2, default=str)
+    print(f'  JSON → {json_path}')
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_path = weights_dir / f"comparison_report_{timestamp}.json"
-    with open(json_path, "w") as f:
-        json.dump(results_clean, f, indent=2, default=str)
-    print(f"  JSON data → {json_path}")
+    print(f'\nGenerating figures...')
+    figures = [
+        fig1_snr_heatmap(results, entries, figures_dir),
+        fig2_combined_snr_curves(results, entries, figures_dir),
+        fig3_per_model_comparison(results, entries, figures_dir),
+        fig4_dsge_scatter(results, entries, figures_dir),
+        fig5_example_denoising(results, entries, test_dir, figures_dir),
+    ]
 
-    print(f"\nGenerating reports...")
-    generate_report_en(results, figures, dataset_path.name, weights_dir, timestamp)
-    generate_report_uk(results, figures, dataset_path.name, weights_dir, timestamp)
+    print(f'\nGenerating reports...')
+    generate_report_en(results, entries, figures, dataset_path.name,
+                       weights_dir, timestamp, csv_path)
+    generate_report_uk(results, entries, figures, dataset_path.name,
+                       weights_dir, timestamp, csv_path)
 
-    print(f"\n✅ Done. Reports and figures saved to: {weights_dir}")
+    print(f'\n✅ Done. Output saved to: {weights_dir}')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

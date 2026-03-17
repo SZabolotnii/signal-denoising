@@ -135,9 +135,9 @@ if __name__ == "__main__":
         noisy, clean, random_state=args.seed,
     )
 
-    weights_dir = dataset_path / "weights"
-    weights_dir.mkdir(exist_ok=True)
-    save_path = weights_dir / f"Wavelet_{args.noise_type}_best_params.json"
+    run_dir = dataset_path / "weights" / "runs" / f"Wavelet_{args.noise_type}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_path = run_dir / "best_params.json"
     with open(save_path, "w") as f:
         json.dump({"best_params": best_params, "val_mse": val_mse, "test_mse": test_mse}, f, indent=2)
     print(f"✅ Best params saved to: {save_path}")
