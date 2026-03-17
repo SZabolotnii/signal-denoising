@@ -1,0 +1,259 @@
+"""
+DSGE Feature Extractor — реалізація розкладу в просторі з порідним елементом
+(Decomposition in Space with Generating Element / Простір Кунченка).
+
+Теорія:
+    Порідний вектор X (чистий сигнал) наближається узгодженим вектором Y:
+        X ≈ Y = k₀ + Σᵢ kᵢ · φᵢ(x̃)
+    де φᵢ — нелінійні базисні функції від зашумлених спостережень x̃,
+    а оптимальні коефіцієнти K знаходяться з KF = B (з регуляризацією Тіхонова).
+
+Інтеграція з U-Net:
+    φᵢ(x̃) → STFT → |Zxx_i| — DSGE-спектрограма для i-го каналу.
+    4-канальний вхід U-Net = [STFT(x̃), STFT(φ₁(x̃)), STFT(φ₂(x̃)), STFT(φ₃(x̃))].
+"""
+
+import numpy as np
+from scipy.signal import stft
+
+
+# ──────────────────────────────────────────────────────
+#  Доступні типи базисів
+# ──────────────────────────────────────────────────────
+
+def fractional_basis(x: np.ndarray, powers: list[float]) -> np.ndarray:
+    """
+    Дробово-степеневий базис: φᵢ(x) = sign(x) · |x|^pᵢ.
+    Зберігає знак — критично для QPSK/FSK (фаза несе інформацію).
+    """
+    return np.array([np.sign(x) * np.abs(x) ** p for p in powers])
+
+
+def polynomial_basis(x: np.ndarray, powers: list[float]) -> np.ndarray:
+    """Поліноміальний базис: φᵢ(x) = x^pᵢ  (цілі степені)."""
+    return np.array([x ** int(p) for p in powers])
+
+
+def trigonometric_basis(x: np.ndarray, freqs: list[float]) -> np.ndarray:
+    """Тригонометричний базис: φᵢ(x) = sin(fᵢ · x)."""
+    return np.array([np.sin(f * x) for f in freqs])
+
+
+def robust_basis(x: np.ndarray, **kwargs) -> np.ndarray:
+    """Робастний базис: tanh, sigmoid, atan — пригнічують викиди."""
+    return np.array([
+        np.tanh(x),
+        1.0 / (1.0 + np.exp(-x)),   # sigmoid
+        np.arctan(x),
+    ])
+
+
+# Реєстр доступних базисів
+_BASIS_REGISTRY = {
+    'fractional': fractional_basis,
+    'polynomial': polynomial_basis,
+    'trigonometric': trigonometric_basis,
+    'robust': robust_basis,
+}
+
+
+# ──────────────────────────────────────────────────────
+#  Головний клас
+# ──────────────────────────────────────────────────────
+
+class DSGEFeatureExtractor:
+    """
+    Обчислення DSGE-ознак для знешумлення сигналів.
+
+    Parameters
+    ----------
+    basis_type : str
+        Тип базисних функцій: 'fractional' | 'polynomial' | 'trigonometric' | 'robust'.
+    powers : list[float]
+        Степені або частоти для відповідного basis_type.
+        За замовчуванням: [0.5, 1.5, 2.0] для fractional (оптимальний з HAR-статті).
+    tikhonov_lambda : float
+        Коефіцієнт λ для регуляризації Тихонова (запобігає виродженості F).
+    stft_params : dict
+        Параметри STFT: {'nperseg': 32, 'noverlap': 16, 'fs': 8192}.
+    """
+
+    def __init__(
+        self,
+        basis_type: str = 'fractional',
+        powers: list[float] | None = None,
+        tikhonov_lambda: float = 0.01,
+        stft_params: dict | None = None,
+    ):
+        self.basis_type = basis_type
+        self.powers = powers if powers is not None else [0.5, 1.5, 2.0]
+        self.tikhonov_lambda = tikhonov_lambda
+        self.stft_params = stft_params or {'nperseg': 32, 'noverlap': 16, 'fs': 8192}
+
+        if basis_type not in _BASIS_REGISTRY:
+            raise ValueError(
+                f"Unknown basis_type '{basis_type}'. "
+                f"Available: {list(_BASIS_REGISTRY.keys())}"
+            )
+
+        self._basis_fn = _BASIS_REGISTRY[basis_type]
+
+        # Стан після fit()
+        self._fitted = False
+        self.S: int = len(self.powers)
+        self.psi_0: float | None = None
+        self.psi: np.ndarray | None = None
+        self.K: np.ndarray | None = None
+        self.k0: float | None = None
+        self.gen_element_norm: float | None = None
+
+    # ──────────────────────────────────────────────────
+    #  Обчислення базису
+    # ──────────────────────────────────────────────────
+
+    def _apply_basis(self, x: np.ndarray) -> np.ndarray:
+        """Застосовує базисні функції. Повертає [S, len(x)]."""
+        if self.basis_type == 'robust':
+            return self._basis_fn(x)
+        else:
+            return self._basis_fn(x, self.powers)
+
+    # ──────────────────────────────────────────────────
+    #  Fit: навчання на тренувальних даних
+    # ──────────────────────────────────────────────────
+
+    def fit(self, clean_signals: np.ndarray, noisy_signals: np.ndarray) -> 'DSGEFeatureExtractor':
+        """
+        Обчислює статистики та коефіцієнти K на тренувальних даних.
+
+        Parameters
+        ----------
+        clean_signals : np.ndarray, shape [N, T]
+        noisy_signals : np.ndarray, shape [N, T]
+        """
+        N, T = clean_signals.shape
+        self.S = len(self.powers)
+
+        clean_norm = (clean_signals - clean_signals.mean(axis=1, keepdims=True)) / (
+            clean_signals.std(axis=1, keepdims=True) + 1e-8
+        )
+        gen_element = clean_norm.mean(axis=0)
+        self.gen_element_norm = float(np.linalg.norm(gen_element))
+
+        self.psi_0 = float(clean_signals.mean())
+
+        phi_all = np.array([self._apply_basis(noisy_signals[i]) for i in range(N)])  # [N, S, T]
+        self.psi = phi_all.mean(axis=(0, 2))  # [S]
+
+        phi_centered = phi_all - self.psi[np.newaxis, :, np.newaxis]
+        x_centered = clean_signals - self.psi_0
+
+        phi_flat = phi_centered.transpose(1, 0, 2).reshape(self.S, -1)  # [S, N*T]
+        F = (phi_flat @ phi_flat.T) / phi_flat.shape[1]                 # [S, S]
+        F_reg = F + self.tikhonov_lambda * np.eye(self.S)
+
+        x_flat = x_centered.reshape(1, -1)
+        B = (phi_flat @ x_flat.T).ravel() / phi_flat.shape[1]           # [S]
+
+        self.K = np.linalg.solve(F_reg, B)
+        self.k0 = self.psi_0 - float(self.K @ self.psi)
+
+        self._fitted = True
+        return self
+
+    # ──────────────────────────────────────────────────
+    #  compute_basis
+    # ──────────────────────────────────────────────────
+
+    def compute_basis(self, noisy_signal: np.ndarray) -> np.ndarray:
+        """Обчислює базисні функції від одного сигналу. Повертає [S, T]."""
+        return self._apply_basis(noisy_signal)
+
+    # ──────────────────────────────────────────────────
+    #  compute_dsge_spectrograms
+    # ──────────────────────────────────────────────────
+
+    def compute_dsge_spectrograms(self, noisy_signal: np.ndarray) -> np.ndarray:
+        """
+        STFT від кожного φᵢ(x̃). Повертає [S, F, T'].
+        Параметри STFT ідентичні до основної спектрограми.
+        """
+        phi = self.compute_basis(noisy_signal)  # [S, T]
+        nperseg = self.stft_params.get('nperseg', 32)
+        noverlap = self.stft_params.get('noverlap', 16)
+        fs = self.stft_params.get('fs', 8192)
+
+        mags = []
+        for i in range(self.S):
+            _, _, Zxx = stft(phi[i], fs=fs, nperseg=nperseg, noverlap=noverlap)
+            mags.append(np.abs(Zxx))
+
+        return np.array(mags)  # [S, F, T']
+
+    # ──────────────────────────────────────────────────
+    #  reconstruct: пряме DSGE-наближення
+    # ──────────────────────────────────────────────────
+
+    def reconstruct(self, noisy_signal: np.ndarray) -> np.ndarray:
+        """Y = k₀ + Σ kᵢ·φᵢ(x̃). Вимагає fit()."""
+        self._check_fitted()
+        phi = self.compute_basis(noisy_signal)
+        return self.k0 + (self.K[:, np.newaxis] * phi).sum(axis=0)
+
+    # ──────────────────────────────────────────────────
+    #  check_generating_element_norm
+    # ──────────────────────────────────────────────────
+
+    def check_generating_element_norm(self, threshold: float = 0.1) -> bool:
+        self._check_fitted()
+        norm = self.gen_element_norm
+        print(f"[DSGE] Generating element ‖X‖ = {norm:.4f} "
+              f"({'OK' if norm >= threshold else 'DEGENERATE — consider clustering'})")
+        return norm >= threshold
+
+    # ──────────────────────────────────────────────────
+    #  Серіалізація
+    # ──────────────────────────────────────────────────
+
+    def save_state(self, path: str) -> None:
+        self._check_fitted()
+        np.savez(
+            path,
+            psi_0=np.array([self.psi_0]),
+            psi=self.psi,
+            K=self.K,
+            k0=np.array([self.k0]),
+            gen_element_norm=np.array([self.gen_element_norm]),
+            S=np.array([self.S]),
+            powers=np.array(self.powers),
+            tikhonov_lambda=np.array([self.tikhonov_lambda]),
+        )
+        print(f"[DSGE] State saved → {path}")
+
+    @classmethod
+    def load_state(cls, path: str, basis_type: str = 'fractional',
+                   stft_params: dict | None = None) -> 'DSGEFeatureExtractor':
+        data = np.load(path)
+        extractor = cls(
+            basis_type=basis_type,
+            powers=list(data['powers']),
+            tikhonov_lambda=data['tikhonov_lambda'].item(),
+            stft_params=stft_params,
+        )
+        extractor.psi_0 = data['psi_0'].item()
+        extractor.psi = data['psi']
+        extractor.K = data['K']
+        extractor.k0 = data['k0'].item()
+        extractor.gen_element_norm = data['gen_element_norm'].item()
+        extractor.S = data['S'].item()
+        extractor._fitted = True
+        return extractor
+
+    def _check_fitted(self) -> None:
+        if not self._fitted:
+            raise RuntimeError("DSGEFeatureExtractor is not fitted yet. Call fit() first.")
+
+    def __repr__(self) -> str:
+        state = "fitted" if self._fitted else "not fitted"
+        return (f"DSGEFeatureExtractor(basis_type='{self.basis_type}', "
+                f"powers={self.powers}, S={self.S}, lambda={self.tikhonov_lambda}, state={state})")
