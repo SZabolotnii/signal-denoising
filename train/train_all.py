@@ -226,8 +226,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train all denoising models on a dataset")
     p.add_argument("--dataset",       required=True,
                    help="Path to dataset folder (absolute or relative to project root)")
-    p.add_argument("--noise-type",    default="non_gaussian",
-                   choices=["gaussian", "non_gaussian"])
+    p.add_argument("--noise-types",   default="all",
+                   help="Comma-separated or 'all'. Options: gaussian, non_gaussian")
     p.add_argument("--models",        default="all",
                    help=f"Comma-separated or 'all'. Options: {', '.join(ALL_MODELS)}")
     p.add_argument("--epochs",        type=int,   default=50)
@@ -257,7 +257,11 @@ def main():
     print(f"Dataset : {dataset_dir.name}")
     print(f"Config  : block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
           f"scenario={cfg.get('scenario', '?')}")
-    print(f"Training: noise_type={args.noise_type}, epochs={args.epochs}, "
+    noise_types = (
+        ["gaussian", "non_gaussian"] if args.noise_types == "all"
+        else [n.strip() for n in args.noise_types.split(",")]
+    )
+    print(f"Training: noise_types={noise_types}, epochs={args.epochs}, "
           f"batch={args.batch_size}, lr={args.lr}")
 
     weights_dir = dataset_dir / "weights"
@@ -275,17 +279,22 @@ def main():
     )
 
     results = []
-    for m in models_to_train:
-        runner = _RUNNERS.get(m)
-        if runner is None:
-            print(f"Unknown model '{m}', skipping")
-            continue
-        try:
-            result = runner(dataset_dir, cfg, args)
-            results.append(result)
-        except Exception as exc:
-            print(f"ERROR training {m}: {exc}")
-            results.append({'model': m, 'error': str(exc)})
+    for noise_type in noise_types:
+        args.noise_type = noise_type
+        print(f"\n{'#' * 60}")
+        print(f"# Noise type: {noise_type}")
+        print(f"{'#' * 60}")
+        for m in models_to_train:
+            runner = _RUNNERS.get(m)
+            if runner is None:
+                print(f"Unknown model '{m}', skipping")
+                continue
+            try:
+                result = runner(dataset_dir, cfg, args)
+                results.append(result)
+            except Exception as exc:
+                print(f"ERROR training {m} ({noise_type}): {exc}")
+                results.append({'model': m, 'noise_type': noise_type, 'error': str(exc)})
 
     generate_report(results, dataset_dir, args, weights_dir)
     print(f"\n✅ Done. Weights and report saved to: {weights_dir}")

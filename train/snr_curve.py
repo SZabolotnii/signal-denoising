@@ -147,6 +147,35 @@ def plot_snr_curve(
     return fig
 
 
+def save_training_curves(
+    train_losses: list,
+    val_snrs: list,
+    save_path: Path,
+    model_name: str = "",
+    noise_type: str = "",
+) -> None:
+    """Save training loss + val SNR curves as PNG (overfitting monitor, not in main report)."""
+    if not MPL_OK:
+        return
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    epochs = range(1, len(train_losses) + 1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+    ax1.plot(epochs, train_losses, lw=2)
+    ax1.set_xlabel("Epoch"); ax1.set_ylabel("Train loss")
+    ax1.set_title("Training loss")
+    ax1.grid(True, alpha=0.3)
+    ax2.plot(epochs, val_snrs, lw=2, color='tab:orange')
+    ax2.set_xlabel("Epoch"); ax2.set_ylabel("Val SNR (dB)")
+    ax2.set_title("Validation SNR")
+    ax2.grid(True, alpha=0.3)
+    fig.suptitle(f"{model_name} | {noise_type}", fontsize=11)
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    print(f"  Training curves → {save_path}")
+
+
 def log_snr_curve_wandb(results: dict, model_name: str = "") -> None:
     """Log per-SNR metrics and line chart to active W&B run."""
     if not (WANDB_OK and hasattr(wandb, 'run') and wandb.run):

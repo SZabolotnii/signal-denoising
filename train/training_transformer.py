@@ -25,7 +25,7 @@ except Exception:
 
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
 from models.time_series_trasformer import TimeSeriesTransformer
-from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb
+from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
 
 MODEL_NAME = 'TimeSeriesTransformer'
 
@@ -124,6 +124,7 @@ class TransformerTrainer:
         loss_fn = nn.HuberLoss(delta=1.0)
         best_val_snr = float("-inf")
         best_sd = None
+        train_history, val_snr_history = [], []
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
@@ -151,14 +152,21 @@ class TransformerTrainer:
                   f"train={train_loss / len(self.train_loader):.5f} | "
                   f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB")
 
+            train_history.append(train_loss / len(self.train_loader))
+            val_snr_history.append(val_snr)
+
             if val_snr > best_val_snr:
                 best_val_snr = val_snr
                 best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
         weights_dir = self.dataset_path / "weights"
         weights_dir.mkdir(exist_ok=True)
-        save_name = (f"{MODEL_NAME}_{self.noise_type}_{self.dataset_uid}_"
-                     f"{self.run_id}_snr{best_val_snr:.1f}dB_best.pth")
+        save_name = f"{MODEL_NAME}_{self.noise_type}_{self.dataset_uid}_best.pth"
+        save_training_curves(
+            train_history, val_snr_history,
+            weights_dir / "figures" / "training" / f"training_curves_{MODEL_NAME}_{self.noise_type}.png",
+            MODEL_NAME, self.noise_type,
+        )
         save_path = weights_dir / save_name
         torch.save(best_sd, save_path)
         print(f"✅ Best model saved → {save_path}")
@@ -173,7 +181,7 @@ class TransformerTrainer:
             print_snr_table(per_snr, MODEL_NAME)
             plot_snr_curve(
                 per_snr, MODEL_NAME,
-                save_path=weights_dir / f"snr_curve_{MODEL_NAME}_{self.noise_type}_{self.run_id}.png",
+                save_path=weights_dir / f"snr_curve_{MODEL_NAME}_{self.noise_type}.png",
             )
             log_snr_curve_wandb(per_snr, MODEL_NAME)
 
