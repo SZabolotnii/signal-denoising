@@ -26,11 +26,14 @@ except Exception:
 
 from models.autoencoder_resnet import ResNetAutoencoder
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb
+
+MODEL_NAME = 'ResNetAutoencoder'
 
 
 class ResNetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=32, epochs=50, learning_rate=1e-3,
+                 batch_size=32, epochs=50, learning_rate=1e-4,
                  signal_len=256, fs=8192, nperseg=32, random_state=42,
                  wandb_project=""):
         self.dataset_path = Path(dataset_path)
@@ -42,19 +45,19 @@ class ResNetAutoencoderTrainer:
         self.fs = fs
         self.nperseg = nperseg
         self.noverlap = int(nperseg * 0.75)
-        self.pad = self.nperseg // 2
+        self.pad = nperseg // 2
         self.random_state = random_state
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        self.run_id = uuid.uuid4().hex[:8]
+        self.dataset_uid = self.dataset_path.name.split('_')[-1]
+
         if WANDB_OK and wandb_project:
-            run_name = f"ResNetAE_{noise_type}_{uuid.uuid4().hex[:8]}"
-            wandb.init(project=wandb_project, name=run_name, config={
-                "model": "ResNetAutoencoder",
-                "noise_type": noise_type,
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "learning_rate": learning_rate,
-                "random_state": random_state
+            run_name = f"{MODEL_NAME}_{noise_type}_{self.dataset_uid}_{self.run_id}"
+            wandb.init(project=wandb_project, name=run_name, reinit=True, config={
+                "model": MODEL_NAME, "noise_type": noise_type,
+                "epochs": epochs, "batch_size": batch_size, "learning_rate": learning_rate,
+                "random_state": random_state, "dataset": self.dataset_path.name,
             })
             print(f"[W&B] Logging enabled → project='{wandb_project}', run='{run_name}'")
         else:
@@ -64,11 +67,13 @@ class ResNetAutoencoderTrainer:
         self.train_loader, self.val_loader, self.test_loader, self.input_shape = self.load_data()
         self.model = ResNetAutoencoder(self.input_shape).to(self.device)
 
-    def signal_to_mag(self, signal_batch):
+    # ── data ──────────────────────────────────────────────────────────────────
+
+    def _signal_to_mag_tensor(self, signal_batch: torch.Tensor) -> torch.Tensor:
+        """[B, 1, T] → [B, 1, F, T'] spectral magnitude."""
         padded = nn.functional.pad(signal_batch, (self.pad, self.pad), mode="reflect")
-        signals_np = padded.squeeze(1).cpu().numpy()
         mags = []
-        for s in signals_np:
+        for s in padded.squeeze(1).cpu().numpy():
             _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
             mags.append(np.abs(Zxx))
         return torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
@@ -76,174 +81,184 @@ class ResNetAutoencoderTrainer:
     def load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
+        assert noisy.shape[1] == self.signal_len
 
-        assert noisy.shape[1] == self.signal_len, \
-            f"Noisy signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
-        assert clean.shape[1] == self.signal_len, \
-            f"Clean signal length mismatch: expected {self.signal_len}, got {clean.shape[1]}"
-
-        X = torch.tensor(noisy[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
+        X = torch.tensor(noisy[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)  # [N,1,T]
         y = torch.tensor(clean[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
 
         dataset = TensorDataset(X, y)
-        total_len = len(dataset)
-        val_len = int(0.15 * total_len)
-        test_len = int(0.15 * total_len)
-        train_len = total_len - val_len - test_len
-
+        total = len(dataset)
+        val_len  = int(0.15 * total)
+        test_len = int(0.15 * total)
+        train_len = total - val_len - test_len
         train_set, val_set, test_set = random_split(
             dataset, [train_len, val_len, test_len],
-            generator=torch.Generator().manual_seed(self.random_state)
+            generator=torch.Generator().manual_seed(self.random_state),
         )
 
-        example = self.signal_to_mag(X[:1])
+        example = self._signal_to_mag_tensor(X[:1])
         _, _, freq_bins, time_frames = example.shape
-        input_shape = (freq_bins, time_frames)
 
         return (
             DataLoader(train_set, batch_size=self.batch_size, shuffle=True),
-            DataLoader(val_set, batch_size=self.batch_size),
-            DataLoader(test_set, batch_size=self.batch_size),
-            input_shape
+            DataLoader(val_set,   batch_size=self.batch_size),
+            DataLoader(test_set,  batch_size=self.batch_size),
+            (freq_bins, time_frames),
         )
 
-    def train(self):
+    # ── inference ─────────────────────────────────────────────────────────────
+
+    def denoise_numpy(self, noisy: np.ndarray) -> np.ndarray:
+        """[N, T] → [N, T]"""
+        t = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)   # [N, 1, T]
+        result = self._denoise_batch(t.to(self.device))              # [N, 1, T]
+        return result.squeeze(1).cpu().numpy()
+
+    def _denoise_batch(self, signal_batch: torch.Tensor) -> torch.Tensor:
+        """[N, 1, T] → [N, 1, T]"""
+        self.model.eval()
+        padded = nn.functional.pad(signal_batch, (self.pad, self.pad), mode='reflect')
+        mags, phases = [], []
+        for s in padded.squeeze(1).cpu().numpy():
+            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
+            mags.append(np.abs(Zxx))
+            phases.append(np.angle(Zxx))
+        spec_t = torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
+        with torch.no_grad():
+            out_mag = self.model(spec_t).squeeze(1).cpu().numpy()
+        rec_signals = []
+        for mag, phase in zip(out_mag, phases):
+            _, rec = istft(mag * np.exp(1j * phase), fs=self.fs,
+                           nperseg=self.nperseg, noverlap=self.noverlap)
+            rec = rec[self.pad: self.pad + self.signal_len]
+            if len(rec) < self.signal_len:
+                rec = np.pad(rec, (0, self.signal_len - len(rec)))
+            rec_signals.append(rec.astype(np.float32))
+        return torch.tensor(np.stack(rec_signals), dtype=torch.float32).unsqueeze(1)
+
+    # ── validation ────────────────────────────────────────────────────────────
+
+    def _compute_val_snr(self) -> float:
+        all_true, all_pred = [], []
+        for X_batch, y_batch in self.val_loader:
+            pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+            all_pred.append(pred)
+            all_true.append(y_batch.squeeze(1).numpy())
+        return float(SignalToNoiseRatio.calculate(
+            np.concatenate(all_true), np.concatenate(all_pred)
+        ))
+
+    def _compute_val_loss(self, loss_fn) -> float:
+        self.model.eval()
+        total = 0.0
+        with torch.no_grad():
+            for X_batch, _ in self.val_loader:
+                spec = self._signal_to_mag_tensor(X_batch.to(self.device))
+                total += loss_fn(self.model(spec), spec).item()
+        return total / len(self.val_loader)
+
+    # ── training loop ─────────────────────────────────────────────────────────
+
+    def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.MSELoss()
-        best_val_loss = float("inf")
-        best_weights = None
+        loss_fn = nn.HuberLoss(delta=1.0)
+        best_val_snr = float("-inf")
+        best_sd = None
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
-            total_loss = 0
-            train_y_true, train_y_pred = [], []
+            total_loss = 0.0
 
             for X_batch, _ in self.train_loader:
-                X_batch = X_batch.to(self.device)
-                spec = self.signal_to_mag(X_batch)
-                recon = self.model(spec)
-                loss = loss_fn(recon, spec)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                spec = self._signal_to_mag_tensor(X_batch.to(self.device))
+                loss = loss_fn(self.model(spec), spec)
+                optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
-                train_y_pred.append(recon.detach().cpu().numpy())
-                train_y_true.append(spec.cpu().numpy())
 
-            train_metrics = self.compute_epoch_metrics_from_numpy(train_y_true, train_y_pred)
-            val_loss, val_metrics = self.evaluate_loss_and_metrics(self.val_loader, loss_fn)
+            val_loss = self._compute_val_loss(loss_fn)
+            val_snr  = self._compute_val_snr()
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
-                    "train_loss": total_loss / len(self.train_loader),
-                    "train_mse": train_metrics["MSE"],
-                    "val_loss": val_loss,
-                    "val_mse": val_metrics["MSE"],
+                    "train/huber_loss": total_loss / len(self.train_loader),
+                    "val/huber_loss":   val_loss,
+                    "val/snr_db":       val_snr,
                 }, step=epoch)
 
-            print(f"Epoch {epoch:02d} | "
-                  f"Train Loss: {total_loss / len(self.train_loader):.4f} | "
-                  f"Val Loss: {val_loss:.4f} | "
-                  f"Val MSE: {val_metrics['MSE']:.4f}")
+            print(f"Epoch {epoch:02d}/{self.epochs} | "
+                  f"train={total_loss / len(self.train_loader):.5f} | "
+                  f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB")
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_weights = self.model.state_dict()
+            if val_snr > best_val_snr:
+                best_val_snr = val_snr
+                best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
         weights_dir = self.dataset_path / "weights"
         weights_dir.mkdir(exist_ok=True)
-        save_path = weights_dir / f"ResNetAutoencoder_{self.noise_type}_best.pth"
-        torch.save(best_weights, save_path)
-        print(f"✅ Best model saved to: {save_path}")
-        self.model.load_state_dict(best_weights)
-        self.evaluate_metrics(self.test_loader)
+        save_name = (f"{MODEL_NAME}_{self.noise_type}_{self.dataset_uid}_"
+                     f"{self.run_id}_snr{best_val_snr:.1f}dB_best.pth")
+        save_path = weights_dir / save_name
+        torch.save(best_sd, save_path)
+        print(f"✅ Best model saved → {save_path}")
+        self.model.load_state_dict(best_sd)
 
-    def compute_epoch_metrics_from_numpy(self, true_list, pred_list):
-        y_true = np.concatenate(true_list)
-        y_pred = np.concatenate(pred_list)
-        return self.compute_metrics(y_true, y_pred)
+        test_metrics = self._evaluate_test()
 
-    def compute_metrics(self, y_true, y_pred):
+        per_snr = {}
+        test_dir = self.dataset_path / "test"
+        if test_dir.exists():
+            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type)
+            print_snr_table(per_snr, MODEL_NAME)
+            plot_snr_curve(
+                per_snr, MODEL_NAME,
+                save_path=weights_dir / f"snr_curve_{MODEL_NAME}_{self.noise_type}_{self.run_id}.png",
+            )
+            log_snr_curve_wandb(per_snr, MODEL_NAME)
+
+        if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
+            wandb.finish()
+
         return {
+            'model': MODEL_NAME, 'noise_type': self.noise_type,
+            'dataset_uid': self.dataset_uid, 'run_id': self.run_id,
+            'val_snr': best_val_snr, 'test_metrics': test_metrics,
+            'per_snr_results': per_snr, 'weights_path': str(save_path),
+        }
+
+    def _evaluate_test(self) -> dict:
+        all_true, all_pred = [], []
+        with torch.no_grad():
+            for X_batch, y_batch in self.test_loader:
+                pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+                all_pred.append(pred)
+                all_true.append(y_batch.squeeze(1).numpy())
+        y_true = np.concatenate(all_true)
+        y_pred = np.concatenate(all_pred)
+        metrics = {
             "MSE":  MeanSquaredError.calculate(y_true, y_pred),
             "MAE":  MeanAbsoluteError.calculate(y_true, y_pred),
             "RMSE": RootMeanSquaredError.calculate(y_true, y_pred),
             "SNR":  SignalToNoiseRatio.calculate(y_true, y_pred),
         }
-
-    def evaluate_loss_and_metrics(self, loader, criterion):
-        self.model.eval()
-        total_loss = 0
-        val_y_true, val_y_pred = [], []
-        with torch.no_grad():
-            for X_batch, _ in loader:
-                X_batch = X_batch.to(self.device)
-                spec = self.signal_to_mag(X_batch)
-                recon = self.model(spec)
-                loss = criterion(recon, spec)
-                total_loss += loss.item()
-                val_y_pred.append(recon.cpu().numpy())
-                val_y_true.append(spec.cpu().numpy())
-        val_metrics = self.compute_epoch_metrics_from_numpy(val_y_true, val_y_pred)
-        return total_loss / len(loader), val_metrics
-
-    def evaluate_metrics(self, loader):
-        self.model.eval()
-        all_true, all_pred = [], []
-        with torch.no_grad():
-            for X_batch, y_batch in loader:
-                X_batch = X_batch.to(self.device)
-                denoised = self.denoise_batch(X_batch).cpu().numpy()
-                all_pred.append(denoised)
-                all_true.append(y_batch.numpy())
-
-        y_true = np.concatenate(all_true)
-        y_pred = np.concatenate(all_pred)
-        metrics = self.compute_metrics(y_true, y_pred)
-
         if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
-            wandb.log({f"test_{k.lower()}": v for k, v in metrics.items()})
+            wandb.log({f"test/{k.lower()}": v for k, v in metrics.items()})
         print("\n📊 Final Test Metrics:")
         for name, val in metrics.items():
             print(f"  {name}: {val:.2f} dB" if name == "SNR" else f"  {name}: {val:.6f}")
+        return metrics
 
-    def denoise_batch(self, signal_batch):
-        padded = nn.functional.pad(signal_batch, (self.pad, self.pad), mode='reflect')
-        signals_np = padded.squeeze(1).cpu().numpy()
 
-        mags, phases = [], []
-        for s in signals_np:
-            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            mags.append(np.abs(Zxx))
-            phases.append(np.angle(Zxx))
-
-        spec_tensor = torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
-        out_mag = self.model(spec_tensor).squeeze(1).detach().cpu().numpy()
-
-        rec_signals = []
-        for mag, phase in zip(out_mag, phases):
-            Zxx_denoised = mag * np.exp(1j * phase)
-            _, rec = istft(Zxx_denoised, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            rec = rec[self.pad: self.pad + self.signal_len]
-            if len(rec) < self.signal_len:
-                rec = np.pad(rec, (0, self.signal_len - len(rec)))
-            elif len(rec) > self.signal_len:
-                rec = rec[:self.signal_len]
-            rec_signals.append(rec)
-
-        return torch.tensor(np.stack(rec_signals), dtype=torch.float32).unsqueeze(1)
-
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Train ResNet autoencoder for signal denoising")
-    p.add_argument("--dataset", required=True,
-                   help="Path to dataset folder (e.g. data_generation/datasets/<name>)")
-    p.add_argument("--noise-type", default="non_gaussian", choices=["gaussian", "non_gaussian"])
-    p.add_argument("--epochs",     type=int,   default=50)
-    p.add_argument("--batch-size", type=int,   default=32)
-    p.add_argument("--lr",         type=float, default=1e-4)
-    p.add_argument("--nperseg",    type=int,   default=32)
-    p.add_argument("--seed",       type=int,   default=42)
+    p.add_argument("--dataset",       required=True)
+    p.add_argument("--noise-type",    default="non_gaussian", choices=["gaussian", "non_gaussian"])
+    p.add_argument("--epochs",        type=int,   default=50)
+    p.add_argument("--batch-size",    type=int,   default=32)
+    p.add_argument("--lr",            type=float, default=1e-4)
+    p.add_argument("--nperseg",       type=int,   default=32)
+    p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="")
     args = p.parse_args()
 
@@ -254,22 +269,19 @@ if __name__ == "__main__":
     with open(dataset_path / "dataset_config.json") as f:
         cfg = json.load(f)
 
-    signal_len = cfg["block_size"]
-    fs         = cfg["sample_rate"]
-
     print(f"Dataset: {dataset_path.name}")
-    print(f"Config:  block_size={signal_len}, sample_rate={fs}, noise_type={args.noise_type}")
+    print(f"Config:  block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
+          f"noise_type={args.noise_type}")
 
-    trainer = ResNetAutoencoderTrainer(
+    ResNetAutoencoderTrainer(
         dataset_path=dataset_path,
         noise_type=args.noise_type,
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.lr,
-        signal_len=signal_len,
-        fs=fs,
+        signal_len=cfg["block_size"],
+        fs=cfg["sample_rate"],
         nperseg=args.nperseg,
         random_state=args.seed,
         wandb_project=args.wandb_project,
-    )
-    trainer.train()
+    ).train()

@@ -14,6 +14,7 @@ load_dotenv(ROOT / ".env")
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 try:
@@ -24,14 +25,15 @@ except Exception:
 
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
 from models.time_series_trasformer import TimeSeriesTransformer
+from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb
+
+MODEL_NAME = 'TimeSeriesTransformer'
 
 
 class TransformerTrainer:
-    def __init__(self, model, model_name, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=32, epochs=50, learning_rate=1e-3, random_state=42,
+    def __init__(self, dataset_path: Path, noise_type="non_gaussian",
+                 batch_size=32, epochs=50, learning_rate=1e-4, random_state=42,
                  wandb_project="", device=None):
-        self.model = model
-        self.model_name = model_name
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.batch_size = batch_size
@@ -40,140 +42,183 @@ class TransformerTrainer:
         self.random_state = random_state
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
+        self.run_id = uuid.uuid4().hex[:8]
+        self.dataset_uid = self.dataset_path.name.split('_')[-1]
+
         np.random.seed(self.random_state)
         torch.manual_seed(self.random_state)
 
         if WANDB_OK and wandb_project:
-            run_name = f"{model_name}_{noise_type}_{uuid.uuid4().hex[:8]}"
-            wandb.init(project=wandb_project, name=run_name, config={
-                "model": model_name,
-                "noise_type": noise_type,
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "learning_rate": learning_rate,
-                "random_state": random_state
+            run_name = f"{MODEL_NAME}_{noise_type}_{self.dataset_uid}_{self.run_id}"
+            wandb.init(project=wandb_project, name=run_name, reinit=True, config={
+                "model": MODEL_NAME, "noise_type": noise_type,
+                "epochs": epochs, "batch_size": batch_size, "learning_rate": learning_rate,
+                "random_state": random_state, "dataset": self.dataset_path.name,
             })
             print(f"[W&B] Logging enabled → project='{wandb_project}', run='{run_name}'")
         else:
             reason = "wandb not installed" if not WANDB_OK else "no --wandb-project given"
             print(f"[W&B] Logging disabled ({reason})")
 
-    def load_data(self):
-        noisy_signals = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
-        clean_signals = np.load(self.dataset_path / "train" / "clean_signals.npy")
+        self.model = TimeSeriesTransformer(input_dim=1).to(self.device)
+        self.train_loader, self.val_loader, self.test_loader = self._load_data()
 
-        X = torch.tensor(noisy_signals, dtype=torch.float32).unsqueeze(-1)  # (N, T, 1)
-        y = torch.tensor(clean_signals, dtype=torch.float32).unsqueeze(-1)
+    # ── data ──────────────────────────────────────────────────────────────────
+
+    def _load_data(self):
+        noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
+        clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
+
+        X = torch.tensor(noisy, dtype=torch.float32).unsqueeze(-1)  # [N, T, 1]
+        y = torch.tensor(clean, dtype=torch.float32).unsqueeze(-1)
 
         dataset = TensorDataset(X, y)
-        total_len = len(dataset)
-        val_len = int(0.15 * total_len)
-        test_len = int(0.15 * total_len)
-        train_len = total_len - val_len - test_len
+        total = len(dataset)
+        val_len  = int(0.15 * total)
+        test_len = int(0.15 * total)
+        train_len = total - val_len - test_len
+        train_set, val_set, test_set = random_split(
+            dataset, [train_len, val_len, test_len],
+            generator=torch.Generator().manual_seed(self.random_state),
+        )
+        return (
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True),
+            DataLoader(val_set,   batch_size=self.batch_size),
+            DataLoader(test_set,  batch_size=self.batch_size),
+        )
 
-        return random_split(dataset, [train_len, val_len, test_len],
-                            generator=torch.Generator().manual_seed(self.random_state))
+    # ── inference ─────────────────────────────────────────────────────────────
 
-    def train(self):
-        train_set, val_set, test_set = self.load_data()
-        train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True)
-        val_loader   = DataLoader(val_set,   batch_size=self.batch_size)
-        test_loader  = DataLoader(test_set,  batch_size=self.batch_size)
+    def denoise_numpy(self, noisy: np.ndarray) -> np.ndarray:
+        """[N, T] → [N, T]"""
+        self.model.eval()
+        t = torch.tensor(noisy, dtype=torch.float32).unsqueeze(-1).to(self.device)  # [N, T, 1]
+        with torch.no_grad():
+            return self.model(t).squeeze(-1).cpu().numpy()  # [N, T]
 
-        self.model.to(self.device)
-        criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+    # ── validation ────────────────────────────────────────────────────────────
 
-        best_val_loss = float('inf')
-        best_weights = None
+    def _compute_val_snr(self) -> float:
+        all_true, all_pred = [], []
+        for X_batch, y_batch in self.val_loader:
+            pred = self.denoise_numpy(X_batch.squeeze(-1).numpy())
+            all_pred.append(pred)
+            all_true.append(y_batch.squeeze(-1).numpy())
+        return float(SignalToNoiseRatio.calculate(
+            np.concatenate(all_true), np.concatenate(all_pred)
+        ))
+
+    def _compute_val_loss(self, loss_fn) -> float:
+        self.model.eval()
+        total = 0.0
+        with torch.no_grad():
+            for X_batch, y_batch in self.val_loader:
+                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
+                total += loss_fn(self.model(X_batch), y_batch).item()
+        return total / len(self.val_loader)
+
+    # ── training loop ─────────────────────────────────────────────────────────
+
+    def train(self) -> dict:
+        optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+        loss_fn = nn.HuberLoss(delta=1.0)
+        best_val_snr = float("-inf")
+        best_sd = None
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             train_loss = 0.0
-            epoch_train_outputs, epoch_train_targets = [], []
 
-            for X_batch, y_batch in train_loader:
+            for X_batch, y_batch in self.train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 optimizer.zero_grad()
-                y_pred = self.model(X_batch)
-                loss = criterion(y_pred, y_batch)
+                loss = loss_fn(self.model(X_batch), y_batch)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
-                epoch_train_outputs.append(y_pred.detach().cpu().numpy())
-                epoch_train_targets.append(y_batch.cpu().numpy())
 
-            val_metrics = self.compute_epoch_metrics(val_loader)
-            train_metrics = self.compute_epoch_metrics_from_numpy(epoch_train_outputs, epoch_train_targets)
+            val_loss = self._compute_val_loss(loss_fn)
+            val_snr  = self._compute_val_snr()
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
-                    "train_loss": train_loss / len(train_loader),
-                    "train_mse": train_metrics["MSE"],
-                    "val_mse": val_metrics["MSE"],
+                    "train/huber_loss": train_loss / len(self.train_loader),
+                    "val/huber_loss":   val_loss,
+                    "val/snr_db":       val_snr,
                 }, step=epoch)
 
-            print(f"Epoch {epoch:02d} | "
-                  f"Train Loss: {train_loss / len(train_loader):.4f} | "
-                  f"Train MSE: {train_metrics['MSE']:.4f} | "
-                  f"Val MSE: {val_metrics['MSE']:.4f}")
+            print(f"Epoch {epoch:02d}/{self.epochs} | "
+                  f"train={train_loss / len(self.train_loader):.5f} | "
+                  f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB")
 
-            if val_metrics["MSE"] < best_val_loss:
-                best_val_loss = val_metrics["MSE"]
-                best_weights = self.model.state_dict()
+            if val_snr > best_val_snr:
+                best_val_snr = val_snr
+                best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
         weights_dir = self.dataset_path / "weights"
         weights_dir.mkdir(exist_ok=True)
-        save_path = weights_dir / f"{self.model_name}_{self.noise_type}_best.pth"
-        torch.save(best_weights, save_path)
-        print(f"✅ Best model saved to {save_path}")
-        self.model.load_state_dict(best_weights)
-        self.evaluate_metrics(test_loader)
+        save_name = (f"{MODEL_NAME}_{self.noise_type}_{self.dataset_uid}_"
+                     f"{self.run_id}_snr{best_val_snr:.1f}dB_best.pth")
+        save_path = weights_dir / save_name
+        torch.save(best_sd, save_path)
+        print(f"✅ Best model saved → {save_path}")
+        self.model.load_state_dict(best_sd)
 
-    def compute_epoch_metrics(self, loader):
-        self.model.eval()
-        y_true, y_pred = [], []
-        with torch.no_grad():
-            for X_batch, y_batch in loader:
-                X_batch = X_batch.to(self.device)
-                preds  = self.model(X_batch).cpu().squeeze().numpy()
-                truths = y_batch.squeeze().numpy()
-                y_pred.append(preds)
-                y_true.append(truths)
-        return self.compute_metrics(np.concatenate(y_true), np.concatenate(y_pred))
+        test_metrics = self._evaluate_test()
 
-    def compute_epoch_metrics_from_numpy(self, pred_list, true_list):
-        y_pred = np.concatenate(pred_list)
-        y_true = np.concatenate(true_list)
-        return self.compute_metrics(y_true, y_pred)
+        per_snr = {}
+        test_dir = self.dataset_path / "test"
+        if test_dir.exists():
+            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type)
+            print_snr_table(per_snr, MODEL_NAME)
+            plot_snr_curve(
+                per_snr, MODEL_NAME,
+                save_path=weights_dir / f"snr_curve_{MODEL_NAME}_{self.noise_type}_{self.run_id}.png",
+            )
+            log_snr_curve_wandb(per_snr, MODEL_NAME)
 
-    def compute_metrics(self, y_true, y_pred):
+        if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
+            wandb.finish()
+
         return {
+            'model': MODEL_NAME, 'noise_type': self.noise_type,
+            'dataset_uid': self.dataset_uid, 'run_id': self.run_id,
+            'val_snr': best_val_snr, 'test_metrics': test_metrics,
+            'per_snr_results': per_snr, 'weights_path': str(save_path),
+        }
+
+    def _evaluate_test(self) -> dict:
+        all_true, all_pred = [], []
+        for X_batch, y_batch in self.test_loader:
+            pred = self.denoise_numpy(X_batch.squeeze(-1).numpy())
+            all_pred.append(pred)
+            all_true.append(y_batch.squeeze(-1).numpy())
+        y_true = np.concatenate(all_true)
+        y_pred = np.concatenate(all_pred)
+        metrics = {
             "MSE":  MeanSquaredError.calculate(y_true, y_pred),
             "MAE":  MeanAbsoluteError.calculate(y_true, y_pred),
             "RMSE": RootMeanSquaredError.calculate(y_true, y_pred),
             "SNR":  SignalToNoiseRatio.calculate(y_true, y_pred),
         }
-
-    def evaluate_metrics(self, loader):
-        metrics = self.compute_epoch_metrics(loader)
         if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
-            wandb.log({f"test_{k.lower()}": v for k, v in metrics.items()})
+            wandb.log({f"test/{k.lower()}": v for k, v in metrics.items()})
         print("\n📊 Final Test Metrics:")
         for name, value in metrics.items():
             print(f"  {name}: {value:.2f} dB" if name == "SNR" else f"  {name}: {value:.6f}")
         return metrics
 
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Train Transformer for signal denoising")
-    p.add_argument("--dataset", required=True,
-                   help="Path to dataset folder (e.g. data_generation/datasets/<name>)")
-    p.add_argument("--noise-type", default="non_gaussian", choices=["gaussian", "non_gaussian"])
-    p.add_argument("--epochs",     type=int,   default=50)
-    p.add_argument("--batch-size", type=int,   default=32)
-    p.add_argument("--lr",         type=float, default=1e-4)
-    p.add_argument("--seed",       type=int,   default=42)
+    p.add_argument("--dataset",       required=True)
+    p.add_argument("--noise-type",    default="non_gaussian", choices=["gaussian", "non_gaussian"])
+    p.add_argument("--epochs",        type=int,   default=50)
+    p.add_argument("--batch-size",    type=int,   default=32)
+    p.add_argument("--lr",            type=float, default=1e-4)
+    p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="")
     args = p.parse_args()
 
@@ -188,11 +233,7 @@ if __name__ == "__main__":
     print(f"Config:  block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
           f"noise_type={args.noise_type}")
 
-    model = TimeSeriesTransformer(input_dim=1)
-
-    trainer = TransformerTrainer(
-        model=model,
-        model_name="TimeSeriesTransformer",
+    TransformerTrainer(
         dataset_path=dataset_path,
         noise_type=args.noise_type,
         batch_size=args.batch_size,
@@ -200,5 +241,4 @@ if __name__ == "__main__":
         learning_rate=args.lr,
         random_state=args.seed,
         wandb_project=args.wandb_project,
-    )
-    trainer.train()
+    ).train()

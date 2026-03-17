@@ -16,6 +16,15 @@ from metrics import MeanSquaredError
 from models.wavelet import WaveletDenoising
 
 
+GRID = {
+    "wavelet":    ["db4", "sym4", "coif1"],
+    "level":      [2, 3, 4],
+    "thresh_mode":["soft", "hard"],
+    "per_level":  [False],
+    "ext_mode":   ["symmetric"],
+}
+
+
 def grid_search_wavelet(noisy: np.ndarray,
                         clean: np.ndarray,
                         random_state: int = 42,
@@ -23,12 +32,12 @@ def grid_search_wavelet(noisy: np.ndarray,
     """
     Підбирає гіперпараметри класу WaveletDenoising за MSE на валідації.
     Розбиття: ~70% train, 20% val, 10% test (всередині цієї функції).
+
     Повертає: best_params, best_val_mse, test_mse
     """
     assert noisy.shape == clean.shape, "noisy/clean shapes must match"
     N = len(noisy)
 
-    # розбиття на train/val/test
     rng = np.random.default_rng(random_state)
     idx = np.arange(N)
     rng.shuffle(idx)
@@ -36,19 +45,11 @@ def grid_search_wavelet(noisy: np.ndarray,
     val_end = int(0.9 * N)
     train_idx, val_idx, test_idx = idx[:train_end], idx[train_end:val_end], idx[val_end:]
 
-    X_train, y_train = noisy[train_idx], clean[train_idx]  # train не використовується напряму, але залишимо на майбутнє
-    X_val, y_val = noisy[val_idx], clean[val_idx]
+    X_val,  y_val  = noisy[val_idx],  clean[val_idx]
     X_test, y_test = noisy[test_idx], clean[test_idx]
 
-    # дефолтна сітка
     if param_grid is None:
-        param_grid = {
-            "wavelet": ["db2", "db4", "db6", "sym4", "coif1", "bior4.4"],
-            "level": [1, 2, 3, 4, None],  # None -> auto (max level)
-            "thresh_mode": ["soft", "hard"],
-            "per_level": [True, False],
-            "ext_mode": ["symmetric", "periodization"],
-        }
+        param_grid = GRID
 
     keys = list(param_grid.keys())
     combos = list(product(*[param_grid[k] for k in keys]))
@@ -56,14 +57,15 @@ def grid_search_wavelet(noisy: np.ndarray,
     best_params = None
     best_val_mse = np.inf
 
-    # один інстанс, будемо міняти параметри
+    T = X_val.shape[1]
     denoiser = WaveletDenoising()
+
+    print(f"  Grid search: {len(combos)} combos × {len(X_val)} val samples "
+          f"= {len(combos) * len(X_val):,} evaluations")
 
     for combo in combos:
         params = dict(zip(keys, combo))
 
-        # обмежимо рівень максимально можливим для поточного T
-        T = X_val.shape[1]
         max_level = pywt.dwt_max_level(T, pywt.Wavelet(params["wavelet"]).dec_len)
         lvl = params["level"]
         if lvl is None or (isinstance(lvl, int) and lvl > max_level):
@@ -71,7 +73,6 @@ def grid_search_wavelet(noisy: np.ndarray,
 
         denoiser.set_params(**params)
 
-        # валід. MSE
         mses = []
         for x_noisy, x_clean in zip(X_val, y_val):
             x_den = denoiser.denoise(x_noisy)
@@ -82,7 +83,6 @@ def grid_search_wavelet(noisy: np.ndarray,
             best_val_mse = val_mse
             best_params = params
 
-    # Оцінка на тесті з найкращими параметрами
     denoiser.set_params(**best_params)
     test_mses = []
     for x_noisy, x_clean in zip(X_test, y_test):
@@ -109,11 +109,12 @@ if __name__ == "__main__":
         sys.path.insert(0, str(ROOT))
 
     p = argparse.ArgumentParser(description="Wavelet grid search for signal denoising")
-    p.add_argument("--dataset", required=True,
+    p.add_argument("--dataset",    required=True,
                    help="Path to dataset folder (e.g. data_generation/datasets/<name>)")
     p.add_argument("--noise-type", default="non_gaussian", choices=["gaussian", "non_gaussian"])
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--plot", action="store_true", help="Plot an example denoising result")
+    p.add_argument("--seed",       type=int, default=42)
+    p.add_argument("--plot",       action="store_true",
+                   help="Plot an example denoising result")
     args = p.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -130,7 +131,9 @@ if __name__ == "__main__":
     clean = np.load(dataset_path / "train" / "clean_signals.npy")
     assert noisy.shape == clean.shape
 
-    best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean, random_state=args.seed)
+    best_params, val_mse, test_mse = grid_search_wavelet(
+        noisy, clean, random_state=args.seed,
+    )
 
     weights_dir = dataset_path / "weights"
     weights_dir.mkdir(exist_ok=True)
