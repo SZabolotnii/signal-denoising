@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import sys
 from datetime import datetime
@@ -32,7 +33,9 @@ try:
 except Exception:
     WANDB_OK = False
 
-ALL_MODELS = ["unet", "resnet", "vae", "transformer", "wavelet", "hybrid"]
+# Transformer first — largest VRAM consumer (O(T²) attention), trains safely
+# before GPU memory gets fragmented by smaller models.
+ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
 
 
 # ── model runners ─────────────────────────────────────────────────────────────
@@ -299,6 +302,13 @@ def main():
             except Exception as exc:
                 print(f"ERROR training {m} ({noise_type}): {exc}")
                 results.append({'model': m, 'noise_type': noise_type, 'error': str(exc)})
+            finally:
+                gc.collect()
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
     generate_report(results, dataset_dir, args, weights_dir)
     print(f"\n✅ Done. Weights and report saved to: {weights_dir}")
