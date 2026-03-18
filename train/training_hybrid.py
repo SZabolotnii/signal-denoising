@@ -61,8 +61,8 @@ class HybridUnetTrainer:
         learning_rate: float = 1e-4,
         signal_len: int = 256,
         fs: int = 8192,
-        nperseg: int = 32,
-        noverlap: int = 16,
+        nperseg: int = 128,
+        noverlap: int = 96,
         random_state: int = 42,
         wandb_project: str = '',
         device: str | None = None,
@@ -365,7 +365,7 @@ if __name__ == '__main__':
                    choices=['fractional', 'polynomial', 'trigonometric', 'robust'])
     p.add_argument('--dsge-powers',   type=float, nargs='+', default=None)
     p.add_argument('--lambda',        type=float, default=0.01, dest='tikhonov_lambda')
-    p.add_argument('--nperseg',       type=int,   default=32)
+    p.add_argument('--nperseg',       type=int,   default=128)
     p.add_argument('--seed',          type=int,   default=42)
     p.add_argument('--wandb-project', default='')
     args = p.parse_args()
@@ -394,7 +394,7 @@ if __name__ == '__main__':
         signal_len=cfg['block_size'],
         fs=cfg['sample_rate'],
         nperseg=args.nperseg,
-        noverlap=args.nperseg // 2,
+        noverlap=args.nperseg * 3 // 4,
         random_state=args.seed,
         wandb_project=args.wandb_project,
     ).train()

@@ -34,7 +34,7 @@ MODEL_NAME = 'ResNetAutoencoder'
 class ResNetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
                  batch_size=256, epochs=50, learning_rate=1e-4,
-                 signal_len=256, fs=8192, nperseg=32, random_state=42,
+                 signal_len=256, fs=8192, nperseg=128, random_state=42,
                  wandb_project=""):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
@@ -264,7 +264,7 @@ if __name__ == "__main__":
     p.add_argument("--epochs",        type=int,   default=50)
     p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
-    p.add_argument("--nperseg",       type=int,   default=32)
+    p.add_argument("--nperseg",       type=int,   default=128)
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="")
     args = p.parse_args()

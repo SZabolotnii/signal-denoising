@@ -54,7 +54,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
         signal_len=cfg["block_size"],
         fs=cfg["sample_rate"],
         nperseg=args.nperseg,
-        noverlap=args.nperseg // 2,
+        noverlap=args.nperseg * 3 // 4,
         random_state=args.seed,
         wandb_project=args.wandb_project,
     ).train()
@@ -152,7 +152,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         signal_len=cfg["block_size"],
         fs=cfg["sample_rate"],
         nperseg=args.nperseg,
-        noverlap=args.nperseg // 2,
+        noverlap=args.nperseg * 3 // 4,
         random_state=args.seed,
         wandb_project=args.wandb_project,
     ).train()
@@ -240,8 +240,8 @@ def parse_args():
     p.add_argument("--epochs",        type=int,   default=50)
     p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
-    p.add_argument("--nperseg",       type=int,   default=32,
-                   help="STFT window size for spectral models (default 32 for 256-sample signals)")
+    p.add_argument("--nperseg",       type=int,   default=128,
+                   help="STFT window size for spectral models (default 128 for 1024-sample signals)")
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="",
                    help="W&B project name (empty = disable)")

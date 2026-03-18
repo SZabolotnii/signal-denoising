@@ -55,9 +55,10 @@ NOISE_LABEL    = {'gaussian': 'Gaussian',     'non_gaussian': 'Non-Gaussian'}
 NOISE_LABEL_UK = {'gaussian': 'Гаусівський',  'non_gaussian': 'Негаусівський'}
 NOISE_SHORT    = {'gaussian': 'G',             'non_gaussian': 'NG'}
 
-# Consistent colours: blue = Gaussian training, red = Non-Gaussian training
-TRAIN_COLOR  = {'gaussian': '#4878CF', 'non_gaussian': '#D65F5F'}
-LINE_STYLE   = {'gaussian': '-',       'non_gaussian': '--'}
+# Red = Gaussian-trained (baseline), Blue = Non-Gaussian-trained (hypothesis)
+# Dashed = tested on Gaussian, Solid = tested on Non-Gaussian
+TRAIN_COLOR  = {'gaussian': '#D65F5F', 'non_gaussian': '#4878CF'}
+LINE_STYLE   = {'gaussian': '--',      'non_gaussian': '-'}
 
 RCPARAMS = {
     'font.size': 10, 'axes.titlesize': 11, 'axes.labelsize': 10,
@@ -80,13 +81,13 @@ def _device():
     return 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
-def _load_unet(run_dir: Path, cfg: dict, nperseg: int = 32):
+def _load_unet(run_dir: Path, cfg: dict, nperseg: int = 128):
     import torch
     from models.autoencoder_unet import UnetAutoencoder
     from train.training_uae import stft_mag_phase, istft_from_mag_phase
     device = _device()
     fs = cfg['sample_rate']; signal_len = cfg['block_size']
-    noverlap = nperseg // 2; pad = nperseg // 2
+    noverlap = nperseg * 3 // 4; pad = nperseg // 2
     dummy_mag, _ = stft_mag_phase(np.zeros(signal_len), fs, nperseg, noverlap, pad)
     model = UnetAutoencoder(dummy_mag.shape).to(device)
     model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
@@ -107,7 +108,7 @@ def _load_unet(run_dir: Path, cfg: dict, nperseg: int = 32):
     return denoise
 
 
-def _load_resnet(run_dir: Path, cfg: dict, nperseg: int = 32):
+def _load_resnet(run_dir: Path, cfg: dict, nperseg: int = 128):
     import torch; import torch.nn as nn
     from scipy.signal import stft as _stft, istft as _istft
     from models.autoencoder_resnet import ResNetAutoencoder
@@ -141,13 +142,13 @@ def _load_resnet(run_dir: Path, cfg: dict, nperseg: int = 32):
     return denoise
 
 
-def _load_vae(run_dir: Path, cfg: dict, nperseg: int = 32):
+def _load_vae(run_dir: Path, cfg: dict, nperseg: int = 128):
     import torch; import torch.nn as nn
     from scipy.signal import stft as _stft, istft as _istft
     from models.autoencoder_vae import SpectrogramVAE
     device = _device()
     fs = cfg['sample_rate']; signal_len = cfg['block_size']
-    noverlap = nperseg // 2; pad = nperseg // 2
+    noverlap = nperseg * 3 // 4; pad = nperseg // 2
     dummy = torch.zeros(1, 1, signal_len)
     padded = nn.functional.pad(dummy, (pad, pad), mode='reflect')
     _, _, Zxx = _stft(padded[0, 0].numpy(), fs=fs, nperseg=nperseg, noverlap=noverlap)
@@ -190,14 +191,14 @@ def _load_transformer(run_dir: Path, cfg: dict):
     return denoise
 
 
-def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int, nperseg: int = 32):
+def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int, nperseg: int = 128):
     import torch
     from scipy.signal import stft as _stft, istft as _istft
     from models.hybrid_unet import HybridDSGE_UNet
     from models.dsge_layer import DSGEFeatureExtractor
     device = _device()
     fs = cfg['sample_rate']; signal_len = cfg['block_size']
-    noverlap = nperseg // 2
+    noverlap = nperseg * 3 // 4
     _, _, Zxx = _stft(np.zeros(signal_len), fs=fs, nperseg=nperseg, noverlap=noverlap)
     input_shape = np.abs(Zxx).shape
     model = HybridDSGE_UNet(input_shape=input_shape, dsge_order=dsge_order).to(device)
@@ -246,7 +247,7 @@ def _load_wavelet(run_dir: Path):
 
 # ── run discovery ─────────────────────────────────────────────────────────────
 
-def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 32) -> dict:
+def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
     """
     Scan weights/runs/ for all trained models.
     Returns {run_name: {'denoise_fn', 'model_class', 'noise_type', 'is_hybrid',
@@ -505,34 +506,68 @@ def fig2_combined_snr_curves(results: dict, entries: dict, figures_dir: Path) ->
     return path
 
 
+def _hybrid_sort_key(mc: str) -> tuple:
+    m = re.match(r'HybridDSGE_UNet_(\w+)_S(\d+)$', mc)
+    return (m.group(1), int(m.group(2))) if m else (mc, 0)
+
+
+def _model_title(mc: str) -> str:
+    if mc in MODEL_DISPLAY:
+        return MODEL_DISPLAY[mc]
+    m = re.match(r'HybridDSGE_UNet_(\w+)_S(\d+)$', mc)
+    return f"Hybrid ({m.group(1)}, S{m.group(2)})" if m else mc
+
+
 def fig3_per_model_comparison(results: dict, entries: dict, figures_dir: Path) -> Path:
     """
-    For each base model: 2 subplots (test_G / test_NG), each showing
-    Gaussian-trained vs Non-Gaussian-trained curves side by side.
-    Rows = models, cols = test type.
+    For each model (base + hybrid): one plot with 4 SNR curves.
+    Color  = training noise type (red = Gaussian, blue = Non-Gaussian)
+    Style  = test noise type     (dashed = Gaussian, solid = Non-Gaussian)
+
+    Reading logic:
+      Red solid (G-train → NG-test)  — worst case, model trained on easy noise, tested on hard
+      Red dashed (G-train → G-test)  — in-distribution baseline
+      Blue dashed (NG-train → G-test) — generalisation to Gaussian; should ≥ red dashed
+      Blue solid (NG-train → NG-test) — best case; blue dashed ≈ blue solid = positive result
     """
     plt.rcParams.update(RCPARAMS)
     base_classes = [mc for mc in BASE_MODELS
                     if any(entries[n]['model_class'] == mc for n in results)]
-    if not base_classes:
+    hybrid_classes = sorted(
+        set(entries[n]['model_class'] for n in results if entries[n]['is_hybrid']),
+        key=_hybrid_sort_key,
+    )
+    all_classes = base_classes + hybrid_classes
+    if not all_classes:
         return None
 
-    n_rows = len(base_classes)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(10, 3.2 * n_rows), squeeze=False)
-    fig.suptitle('Per-Model: Effect of Training Noise Type', fontsize=12, y=1.01)
+    # (train_nt, test_nt) → (color, linestyle, legend label)
+    # Red = Gaussian-trained (baseline); Blue = Non-Gaussian-trained (hypothesis)
+    # Dashed = tested on Gaussian; Solid = tested on Non-Gaussian
+    CURVE_STYLE = {
+        ('gaussian',     'gaussian'):     ('#D65F5F', '--', 'G-train → G-test'),
+        ('gaussian',     'non_gaussian'): ('#D65F5F', '-',  'G-train → NG-test'),
+        ('non_gaussian', 'gaussian'):     ('#4878CF', '--', 'NG-train → G-test'),
+        ('non_gaussian', 'non_gaussian'): ('#4878CF', '-',  'NG-train → NG-test'),
+    }
 
-    for row_i, mc in enumerate(base_classes):
-        for col_i, test_nt in enumerate(NOISE_TYPES):
-            ax = axes[row_i][col_i]
-            ax.set_title(f'{MODEL_DISPLAY.get(mc, mc)} — test: {NOISE_LABEL[test_nt]}',
-                         fontsize=9)
-            ax.set_xlabel('SNR input (dB)'); ax.set_ylabel('SNR output (dB)')
-            ax.grid(True, alpha=0.2)
-            snr_ins = []
-            for nt in NOISE_TYPES:
-                name = f'{mc}_{nt}'
-                if name not in results:
-                    continue
+    n_rows = len(all_classes)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(8, 3.8 * n_rows), squeeze=False)
+    fig.suptitle('Per-Model SNR Curves — All 4 Train→Test Combinations', fontsize=12, y=1.01)
+
+    for row_i, mc in enumerate(all_classes):
+        ax = axes[row_i][0]
+        ax.set_title(_model_title(mc), fontsize=10)
+        ax.set_xlabel('SNR input (dB)')
+        ax.set_ylabel('SNR output (dB)')
+        ax.grid(True, alpha=0.2)
+        snr_ins = []
+
+        for train_nt in NOISE_TYPES:
+            name = f'{mc}_{train_nt}'
+            if name not in results:
+                continue
+            for test_nt in NOISE_TYPES:
                 per_snr = results[name][test_nt]['per_snr']
                 if not per_snr:
                     continue
@@ -540,13 +575,14 @@ def fig3_per_model_comparison(results: dict, entries: dict, figures_dir: Path) -
                 xs = [per_snr[l]['snr_in_db'] for l in lbls]
                 ys = [per_snr[l]['SNR']       for l in lbls]
                 snr_ins.extend(xs)
-                ax.plot(xs, ys, lw=2, color=TRAIN_COLOR[nt],
-                        linestyle=LINE_STYLE[nt], marker='o', markersize=4,
-                        label=f'Train: {NOISE_LABEL[nt]}')
-            if snr_ins:
-                lims = [min(snr_ins) - 1, max(snr_ins) + 1]
-                ax.plot(lims, lims, 'k:', lw=1, alpha=0.4, label='No change')
-            ax.legend(fontsize=7)
+                color, ls, label = CURVE_STYLE[(train_nt, test_nt)]
+                ax.plot(xs, ys, lw=2, color=color, linestyle=ls,
+                        marker='o', markersize=4, label=label)
+
+        if snr_ins:
+            lims = [min(snr_ins) - 1, max(snr_ins) + 1]
+            ax.plot(lims, lims, 'k:', lw=1, alpha=0.4, label='No change')
+        ax.legend(fontsize=8, loc='upper left')
 
     plt.tight_layout()
     path = figures_dir / 'fig3_per_model_comparison.png'
@@ -747,18 +783,23 @@ def generate_report_en(results: dict, entries: dict, figures: list,
 
         '### Figure 2 — Combined SNR Curves\n',
         'SNR output vs. SNR input for **all base models** on a single axes. '
-        'Solid lines correspond to Gaussian-trained models, dashed lines to '
+        'Dashed lines correspond to Gaussian-trained models, solid lines to '
         'Non-Gaussian-trained models. Each colour represents a different architecture. '
         'The dotted diagonal is the "no-change" baseline (SNR_out = SNR_in). '
         'Any curve above the diagonal indicates improvement.\n',
         '![Fig 2](figures/fig2_combined_snr_curves.png)\n',
 
-        '### Figure 3 — Per-Model Training Noise Comparison\n',
-        'For each architecture individually: the effect of training noise type '
-        'on performance across SNR levels. Blue (solid) = trained on Gaussian noise; '
-        'red (dashed) = trained on Non-Gaussian noise. '
-        'The gap between curves on the Non-Gaussian test panel (right column) '
-        'quantifies the cost of wrong noise assumption during training.\n',
+        '### Figure 3 — Per-Model: All 4 Train→Test Combinations\n',
+        'For each architecture (base models and all HybridDSGE configurations): '
+        'a single plot showing all four SNR curves simultaneously. '
+        '**Colour** encodes the training noise type: **red** = trained on Gaussian (baseline), '
+        '**blue** = trained on Non-Gaussian (hypothesis). '
+        '**Line style** encodes the test noise type: **dashed** = evaluated on Gaussian, '
+        '**solid** = evaluated on Non-Gaussian. '
+        'If the hypothesis holds: blue curves lie above red curves, and the two blue curves '
+        'nearly coincide (NG-train → G-test ≈ NG-train → NG-test), indicating robust generalisation. '
+        'The red solid curve (G-train → NG-test) should be the lowest — '
+        'a model trained only on AWGN degrades most on real-world Non-Gaussian interference.\n',
         '![Fig 3](figures/fig3_per_model_comparison.png)\n',
 
         '### Figure 4 — DSGE Architecture Sweep\n',
@@ -841,17 +882,22 @@ def generate_report_uk(results: dict, entries: dict, figures: list,
 
         '### Рисунок 2 — Об\'єднані криві SNR\n',
         'SNR на виході vs. SNR на вході для **всіх базових моделей** на одних осях. '
-        'Суцільні лінії — моделі, навчені на гаусівському шумі; '
-        'штрихові — навчені на негаусівському. Кожен колір — окрема архітектура. '
+        'Штрихові лінії — моделі, навчені на гаусівському шумі; '
+        'суцільні — навчені на негаусівському. Кожен колір — окрема архітектура. '
         'Пунктирна діагональ — базова лінія «без змін» (SNR_out = SNR_in).\n',
         '![Рис 2](figures/fig2_combined_snr_curves.png)\n',
 
-        '### Рисунок 3 — Порівняння типів навчання для кожної моделі\n',
-        'Для кожної архітектури окремо: вплив типу навчання на якість по рівнях SNR. '
-        'Синій (суцільний) = навчено на гаусівському шумі; '
-        'червоний (штриховий) = навчено на негаусівському. '
-        'Розрив між кривими на правому стовпці (негаусівський тест) '
-        'кількісно показує «ціну» неправильного припущення про тип шуму при навчанні.\n',
+        '### Рисунок 3 — Для кожної моделі: всі 4 комбінації навчання→тест\n',
+        'Для кожної архітектури (базові моделі та всі конфігурації HybridDSGE) — '
+        'один графік із чотирма кривими SNR одночасно. '
+        '**Колір** кодує тип навчання: **червоний** = навчено на гаусівському шумі (базова лінія), '
+        '**синій** = навчено на негаусівському (гіпотеза). '
+        '**Стиль лінії** кодує тип тесту: **штрихова** = оцінка на гаусівському, '
+        '**суцільна** = оцінка на негаусівському. '
+        'Якщо гіпотеза підтверджується — сині криві вищі за червоні, а дві сині криві '
+        'майже збігаються (NG-train → G-test ≈ NG-train → NG-test), що свідчить про '
+        'стійке узагальнення. Червона суцільна крива (G-train → NG-test) має бути найнижчою: '
+        'модель, навчена лише на AWGN, деградує найбільше при реальних негаусівських завадах.\n',
         '![Рис 3](figures/fig3_per_model_comparison.png)\n',
 
         '### Рисунок 4 — Перебір архітектур HybridDSGE_UNet\n',
@@ -896,7 +942,7 @@ def main():
     p = argparse.ArgumentParser(description='Cross-evaluation comparison report')
     p.add_argument('--dataset',     required=True, help='Path to dataset folder')
     p.add_argument('--weights-dir', default='',    help='Override weights dir')
-    p.add_argument('--nperseg',     type=int, default=32)
+    p.add_argument('--nperseg',     type=int, default=128)
     p.add_argument('--seed',        type=int, default=42)
     args = p.parse_args()
 

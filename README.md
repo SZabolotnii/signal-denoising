@@ -50,8 +50,8 @@
 наступний крок після підтвердження гіпотези.
 
 **Block-based processing:** нейронна мережа обробляє фіксовані блоки
-по 256 семплів. При частоті дискретизації 8192 Гц це відповідає
-латентності ~31 мс, прийнятній для більшості застосувань реального часу.
+по 1024 семпли. При частоті дискретизації 8192 Гц це відповідає
+латентності ~125 мс, прийнятній для більшості застосувань реального часу.
 Fully convolutional архітектура дозволяє застосовувати модель до блоків
 довільної довжини без переробки при деплої.
 
@@ -219,7 +219,7 @@ python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
 | `--epochs` | `50` | Кількість епох |
 | `--batch-size` | `256` | Розмір батча |
 | `--lr` | `1e-4` | Learning rate |
-| `--nperseg` | `32` | Розмір вікна STFT (для спектральних моделей) |
+| `--nperseg` | `128` | Розмір вікна STFT (для спектральних моделей) |
 | `--seed` | `42` | Random seed |
 | `--wandb-project` | `""` | W&B project (порожньо = вимкнено) |
 
@@ -339,7 +339,7 @@ python train/compare_report.py --dataset $DATASET
 4. ~~generate big dataset~~
 5. ~~train models on both noise types~~
 6. ~~create comparison report with cross-evaluation~~
-7. evaluate with `nperseg=128, noverlap=96` across all models
+7. ~~evaluate with `nperseg=128, noverlap=96` across all models~~
 
 ## Articles
 

@@ -70,7 +70,7 @@ def multi_res_stft_loss(x_hat: torch.Tensor, x: torch.Tensor,
 class UnetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
                  batch_size=256, epochs=30, learning_rate=1e-4,
-                 signal_len=256, fs=8192, nperseg=32, noverlap=16, random_state=42,
+                 signal_len=256, fs=8192, nperseg=128, noverlap=96, random_state=42,
                  wandb_project="", device=None):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
@@ -80,7 +80,7 @@ class UnetAutoencoderTrainer:
         self.signal_len = signal_len
         self.fs = fs
         self.nperseg = nperseg
-        self.noverlap = nperseg // 2   # enforce Hann COLA
+        self.noverlap = nperseg * 3 // 4   # 75% overlap (Hann COLA satisfied)
         self.pad = nperseg // 2
         self.random_state = random_state
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -321,7 +321,7 @@ if __name__ == "__main__":
     p.add_argument("--epochs",        type=int,   default=30)
     p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
-    p.add_argument("--nperseg",       type=int,   default=32)
+    p.add_argument("--nperseg",       type=int,   default=128)
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="")
     args = p.parse_args()

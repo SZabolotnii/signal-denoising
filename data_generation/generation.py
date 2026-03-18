@@ -56,7 +56,7 @@ class SignalDatasetGenerator:
         self,
         num_samples: int,
         sample_rate: int = 8192,
-        block_size: int = 256,
+        block_size: int = 1024,
         scenario: str = "deep_space",
         modulation_type: str = "bpsk",
         bits_per_symbol: int = 1,
@@ -699,8 +699,8 @@ if __name__ == "__main__":
         help="log₂(M): constellation/alphabet size M = 2^bps (default: 1)",
     )
     parser.add_argument(
-        "--block_size", type=int, default=256,
-        help="Samples per training example (default: 256)\n"
+        "--block_size", type=int, default=1024,
+        help="Samples per training example (default: 1024)\n"
              "Deployment latency = block_size / sample_rate",
     )
 

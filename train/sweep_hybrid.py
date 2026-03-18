@@ -62,7 +62,7 @@ def parse_args():
     p.add_argument("--epochs",        type=int,   default=30)
     p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
-    p.add_argument("--nperseg",       type=int,   default=32)
+    p.add_argument("--nperseg",       type=int,   default=128)
     p.add_argument("--lambda",        type=float, default=0.01, dest="tikhonov_lambda")
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="")
@@ -86,7 +86,7 @@ def main():
 
     signal_len = cfg["block_size"]
     fs         = cfg["sample_rate"]
-    noverlap   = args.nperseg // 2
+    noverlap   = args.nperseg * 3 // 4
 
     if args.configs == "all":
         configs_to_run = list(range(len(SWEEP_CONFIGS)))
