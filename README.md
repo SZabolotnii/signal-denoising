@@ -65,23 +65,23 @@ signal-denoising/
 │   ├── generation.py          <- генератор синтетичних датасетів
 │   ├── evaluate_dataset.py    <- оцінка якості датасету через аналіз кумулянтів
 │   └── datasets/              <- згенеровані датасети (gitignored)
-│       └── deep_space_..._<uid>/
+│       └── fpv_telemetry_..._<uid>/
 │           ├── dataset_config.json
 │           ├── train/         <- clean_signals.npy, gaussian_signals.npy, non_gaussian_signals.npy
-│           ├── test/          <- per-SNR test files: test_m10dB_gaussian.npy, ...
+│           ├── test/          <- per-SNR test files: test_m05dB_gaussian.npy, ...
 │           └── weights/       <- ваги моделей (створюється автоматично)
 │               ├── runs/
-│               │   ├── UnetAutoencoder_gaussian/
+│               │   ├── run_20260324_a1b2c3d4_UnetAutoencoder_gaussian/
 │               │   │   ├── model_best.pth
 │               │   │   └── figures/
 │               │   │       ├── training_curves.png
 │               │   │       └── snr_curve.png
-│               │   ├── UnetAutoencoder_non_gaussian/
-│               │   ├── HybridDSGE_UNet_fractional_S3_gaussian/
+│               │   ├── run_20260324_e5f6a7b8_UnetAutoencoder_non_gaussian/
+│               │   ├── run_20260324_c9d0e1f2_HybridDSGE_UNet_fractional_S3_gaussian/
 │               │   │   ├── model_best.pth
 │               │   │   ├── dsge_state.npz
 │               │   │   └── figures/
-│               │   └── Wavelet_gaussian/
+│               │   └── run_20260324_g3h4i5j6_Wavelet_gaussian/
 │               │       └── best_params.json
 │               ├── figures/           <- порівняльні графіки (compare_report.py)
 │               │   ├── fig1_snr_heatmap.png
@@ -125,18 +125,17 @@ signal-denoising/
 Синтетичний датасет моделює **цифровий baseband-сигнал після downconversion**
 для двох сценаріїв:
 
+- **fpv_telemetry** (дефолт): FPV-телеметрія / ELRS-подібні системи, QPSK, SNR −5..+15 дБ
 - **deep_space**: умови дальнього космічного зв'язку, BPSK/QPSK, SNR −20..0 дБ
-- **fpv_telemetry**: FPV-телеметрія / ELRS-подібні системи, CPFSK/GFSK/QPSK, SNR −5..+15 дБ
 
 Для кожного прикладу генерується три версії: чистий сигнал, з AWGN і з негауссовим шумом.
-Основний тип негауссового шуму — **нестаціонарний полігауссовий**: суміш гауссіан,
-параметри якої плавно дрейфують через процеси Орнштейна-Уленбека, що імітує
-реальне мінливе радіосередовище.
+Основний тип негауссового шуму — **стаціонарний полігауссовий (polygauss)**: суміш K гауссіан
+з випадково обраними параметрами, що імітує одночасну присутність кількох джерел завад.
 
 Детальна документація: [`data_generation/README.md`](data_generation/README.md)
 
 ```bash
-# Генерація датасету (дефолт: deep_space, polygauss_nonstationary, bpsk)
+# Генерація датасету (дефолт: fpv_telemetry, polygauss, qpsk, 400 000 прикладів)
 python data_generation/generation.py
 
 # Оцінка якості
@@ -216,8 +215,8 @@ python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
 | `--dataset` | — | Шлях до папки датасету (обов'язковий) |
 | `--noise-types` | `all` | `gaussian`, `non_gaussian` або `all` |
 | `--models` | `all` | Через кому або `all`: `unet,resnet,vae,transformer,wavelet,hybrid` |
-| `--epochs` | `50` | Кількість епох |
-| `--batch-size` | `256` | Розмір батча |
+| `--epochs` | `50` | Максимальна кількість епох (early stopping зупинить раніше) |
+| `--batch-size` | per-model | Розмір батча (авто per-model, або явно) |
 | `--lr` | `1e-4` | Learning rate |
 | `--nperseg` | `128` | Розмір вікна STFT (для спектральних моделей) |
 | `--seed` | `42` | Random seed |
@@ -228,30 +227,26 @@ python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
 ```
 weights/
 ├── runs/
-│   ├── UnetAutoencoder_gaussian/
+│   ├── run_20260324_a1b2c3d4_UnetAutoencoder_gaussian/
 │   │   ├── model_best.pth
 │   │   └── figures/
 │   │       ├── training_curves.png   <- loss + val_SNR по епохах
 │   │       └── snr_curve.png
-│   ├── UnetAutoencoder_non_gaussian/
-│   ├── ResNetAutoencoder_gaussian/
-│   ├── ResNetAutoencoder_non_gaussian/
-│   ├── SpectrogramVAE_gaussian/
-│   ├── SpectrogramVAE_non_gaussian/
-│   ├── TimeSeriesTransformer_gaussian/
-│   ├── TimeSeriesTransformer_non_gaussian/
-│   ├── HybridDSGE_UNet_fractional_S3_gaussian/
+│   ├── run_20260324_e5f6a7b8_UnetAutoencoder_non_gaussian/
+│   ├── run_20260324_..._ResNetAutoencoder_gaussian/
+│   ├── run_20260324_..._SpectrogramVAE_non_gaussian/
+│   ├── run_20260324_..._TimeSeriesTransformer_gaussian/
+│   ├── run_20260324_..._HybridDSGE_UNet_fractional_S3_gaussian/
 │   │   ├── model_best.pth
 │   │   └── dsge_state.npz
-│   ├── HybridDSGE_UNet_fractional_S3_non_gaussian/
-│   ├── Wavelet_gaussian/
+│   ├── run_20260324_..._Wavelet_gaussian/
 │   │   └── best_params.json
-│   └── Wavelet_non_gaussian/
+│   └── ...
 └── training_report_<timestamp>.md
 ```
 
-Кожна підпапка в `runs/` перезаписується при повторному запуску — зберігається
-лише найкраща модель за `val_SNR` для кожної комбінації (модель × тип шуму).
+Кожен запуск створює **нову** підпапку з унікальним іменем `run_{дата}_{uuid}_{модель}_{тип_шуму}` —
+попередні ваги не перезаписуються, можна порівнювати кілька ранів.
 
 ### Тренування окремих моделей
 
@@ -308,7 +303,7 @@ python train/compare_report.py --dataset $DATASET
 | `figures/fig4_dsge_scatter.png` | Scatter архітектур DSGE: узагальнення по обох тестах |
 | `figures/fig5_example_denoising.png` | Приклад знешумлення сигналу |
 
-Крім того, для кожного навченого варіанту в `runs/<ModelName>_<noise_type>/figures/` зберігаються:
+Крім того, для кожного навченого варіанту в `runs/run_{дата}_{uuid}_{модель}_{тип}/figures/` зберігаються:
 - `training_curves.png` — loss і val_SNR по епохах (для контролю оверфіту, не в основному звіті)
 - `snr_curve.png` — крива SNR на тренувальному типі шуму
 
@@ -318,15 +313,17 @@ python train/compare_report.py --dataset $DATASET
 
 | Модель | Клас | Опис |
 |--------|------|------|
-| **U-Net** | `UnetAutoencoder` | STFT-маска, log-MAE + multi-res STFT loss |
-| **ResNet** | `ResNetAutoencoder` | STFT autoencoder, HuberLoss |
-| **VAE** | `SpectrogramVAE` | Варіаційний autoencoder на спектрограмі, HuberLoss + KL |
-| **Transformer** | `TimeSeriesTransformer` | Time-domain, HuberLoss |
+| **U-Net** | `UnetAutoencoder` | STFT-маска (sigmoid) × noisy_spec → clean_spec, MSELoss |
+| **ResNet** | `ResNetAutoencoder` | STFT-маска (sigmoid) × noisy_spec → clean_spec, MSELoss |
+| **VAE** | `SpectrogramVAE` | Варіаційний autoencoder: noisy_spec → clean_spec, MSELoss + KL |
+| **Transformer** | `TimeSeriesTransformer` | Time-domain, noisy → clean, MSELoss |
 | **Wavelet** | `WaveletDenoising` | Порогова обробка вейвлет-коефіцієнтів, grid search |
-| **HybridDSGE** | `HybridDSGE_UNet` | U-Net + DSGE-канали нелінійних ознак, HuberLoss |
+| **HybridDSGE** | `HybridDSGE_UNet` | U-Net + DSGE-канали нелінійних ознак, MSELoss |
 
 Всі нейронні моделі:
-- Навчаються за критерієм `max(val_SNR)` — зберігаються ваги з найкращим SNR на валідації
+- Supervised: тренуються відображати зашумлений сигнал → чистий (ціль — clean, не noisy)
+- Оптимізуються за критерієм `max(val_SNR)` — зберігаються ваги з найкращим SNR на валідації
+- `ReduceLROnPlateau(patience=3, factor=0.5)` на `val_SNR` + early stopping після 7 епох без покращення
 - Підтримують `denoise_numpy(noisy: [N,T]) → [N,T]` — уніфікований API для inference
 
 ---

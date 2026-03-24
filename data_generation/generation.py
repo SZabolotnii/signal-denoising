@@ -648,10 +648,10 @@ if __name__ == "__main__":
     )
 
     # Dataset size
-    parser.add_argument("--num_train",       type=int, default=200_000,
-                        help="Training samples (default: 200000)")
-    parser.add_argument("--samples_per_snr", type=int, default=5000,
-                        help="Test samples per SNR point (default: 5000)")
+    parser.add_argument("--num_train",       type=int, default=400_000,
+                        help="Training samples (default: 400000)")
+    parser.add_argument("--samples_per_snr", type=int, default=10_000,
+                        help="Test samples per SNR point (default: 10000)")
 
     args = parser.parse_args()
 

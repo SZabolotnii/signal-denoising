@@ -172,9 +172,14 @@ class VAETrainer:
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         loss_fn = nn.MSELoss(reduction="sum")
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', patience=3, factor=0.5, min_delta=0.01
+        )
         best_val_snr = float("-inf")
         best_sd = None
         train_history, val_snr_history = [], []
+        no_improve = 0
+        early_stop_patience = 7
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
@@ -194,16 +199,21 @@ class VAETrainer:
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
 
+            scheduler.step(val_snr)
+            lr_now = optimizer.param_groups[0]['lr']
+
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
                     "train/mse_kl_loss": total_loss / len(self.train_loader),
                     "val/mse_kl_loss":   val_loss,
                     "val/snr_db":        val_snr,
+                    "train/lr":          lr_now,
                 }, step=epoch)
 
             print(f"Epoch {epoch:02d}/{self.epochs} | "
                   f"train={total_loss / len(self.train_loader):.5f} | "
-                  f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB")
+                  f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB | "
+                  f"lr={lr_now:.2e}")
 
             train_history.append(total_loss / len(self.train_loader))
             val_snr_history.append(val_snr)
@@ -211,6 +221,12 @@ class VAETrainer:
             if val_snr > best_val_snr:
                 best_val_snr = val_snr
                 best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= early_stop_patience:
+                    print(f"  Early stopping: no improvement for {early_stop_patience} epochs")
+                    break
 
         run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
