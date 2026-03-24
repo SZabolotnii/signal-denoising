@@ -23,6 +23,8 @@ try:
 except Exception:
     WANDB_OK = False
 
+from tqdm import tqdm
+
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
 from models.time_series_trasformer import TimeSeriesTransformer
 from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
@@ -121,7 +123,7 @@ class TransformerTrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.HuberLoss(delta=1.0)
+        loss_fn = nn.MSELoss()
         best_val_snr = float("-inf")
         best_sd = None
         train_history, val_snr_history = [], []
@@ -130,22 +132,24 @@ class TransformerTrainer:
             self.model.train()
             train_loss = 0.0
 
-            for X_batch, y_batch in self.train_loader:
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
+            for X_batch, y_batch in pbar:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 optimizer.zero_grad()
                 loss = loss_fn(self.model(X_batch), y_batch)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
+                pbar.set_postfix(loss=f"{loss.item():.5f}")
 
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
-                    "train/huber_loss": train_loss / len(self.train_loader),
-                    "val/huber_loss":   val_loss,
-                    "val/snr_db":       val_snr,
+                    "train/mse_loss": train_loss / len(self.train_loader),
+                    "val/mse_loss":   val_loss,
+                    "val/snr_db":     val_snr,
                 }, step=epoch)
 
             print(f"Epoch {epoch:02d}/{self.epochs} | "

@@ -13,6 +13,7 @@ load_dotenv(ROOT / ".env")
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from scipy.signal import stft, istft
@@ -22,6 +23,8 @@ try:
     WANDB_OK = True
 except Exception:
     WANDB_OK = False
+
+from tqdm import tqdm
 
 from models.autoencoder_unet import UnetAutoencoder
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
@@ -69,7 +72,7 @@ def multi_res_stft_loss(x_hat: torch.Tensor, x: torch.Tensor,
 
 class UnetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=256, epochs=30, learning_rate=1e-4,
+                 batch_size=512, epochs=30, learning_rate=1e-4,
                  signal_len=256, fs=8192, nperseg=128, noverlap=96, random_state=42,
                  wandb_project="", device=None):
         self.dataset_path = Path(dataset_path)
@@ -165,36 +168,30 @@ class UnetAutoencoderTrainer:
             np.concatenate(all_true), np.concatenate(all_pred)
         ))
 
-    def _compute_val_loss(self) -> float:
+    def _compute_val_loss(self, loss_fn) -> float:
         self.model.eval()
         total = 0.0
         with torch.no_grad():
             for noisy, clean in self.val_loader:
                 noisy_np = noisy.numpy()
                 clean_np = clean.numpy()
-                mags, phases, clean_mags = [], [], []
+                mags, clean_mags = [], []
                 for xn, xc in zip(noisy_np, clean_np):
-                    nm, ph = stft_mag_phase(xn, self.fs, self.nperseg, self.noverlap, self.pad)
-                    cm, _  = stft_mag_phase(xc, self.fs, self.nperseg, self.noverlap, self.pad)
-                    mags.append(nm); phases.append(ph); clean_mags.append(cm)
+                    nm, _ = stft_mag_phase(xn, self.fs, self.nperseg, self.noverlap, self.pad)
+                    cm, _ = stft_mag_phase(xc, self.fs, self.nperseg, self.noverlap, self.pad)
+                    mags.append(nm); clean_mags.append(cm)
                 nm_t = torch.tensor(np.stack(mags),       dtype=torch.float32, device=self.device).unsqueeze(1)
                 cm_t = torch.tensor(np.stack(clean_mags), dtype=torch.float32, device=self.device).unsqueeze(1)
                 mask    = self.model(nm_t)
                 out_mag = mask * nm_t
-                base_loss = torch.mean(torch.abs(torch.log1p(out_mag) - torch.log1p(cm_t)))
-                rec_list = [
-                    istft_from_mag_phase(om, ph, self.fs, self.nperseg, self.noverlap, self.pad, self.signal_len)
-                    for om, ph in zip(out_mag.squeeze(1).cpu().numpy(), phases)
-                ]
-                rec_t = torch.tensor(np.stack(rec_list), device=self.device)
-                mr_loss = multi_res_stft_loss(rec_t, clean.to(self.device))
-                total += float((base_loss + 0.5 * mr_loss).item())
+                total += loss_fn(out_mag, cm_t).item()
         return total / len(self.val_loader)
 
     # ── training loop ─────────────────────────────────────────────────────────
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+        loss_fn = nn.MSELoss()
         best_val_snr = float("-inf")
         best_sd = None
         train_history, val_snr_history = [], []
@@ -203,43 +200,37 @@ class UnetAutoencoderTrainer:
             self.model.train()
             epoch_loss = 0.0
 
-            for noisy, clean in self.train_loader:
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
+            for noisy, clean in pbar:
                 noisy_np = noisy.numpy()
                 clean_np = clean.numpy()
-                mags, phases, clean_mags = [], [], []
+                mags, clean_mags = [], []
                 for xn, xc in zip(noisy_np, clean_np):
-                    nm, ph = stft_mag_phase(xn, self.fs, self.nperseg, self.noverlap, self.pad)
-                    cm, _  = stft_mag_phase(xc, self.fs, self.nperseg, self.noverlap, self.pad)
-                    mags.append(nm); phases.append(ph); clean_mags.append(cm)
+                    nm, _ = stft_mag_phase(xn, self.fs, self.nperseg, self.noverlap, self.pad)
+                    cm, _ = stft_mag_phase(xc, self.fs, self.nperseg, self.noverlap, self.pad)
+                    mags.append(nm); clean_mags.append(cm)
 
                 nm_t = torch.tensor(np.stack(mags),       dtype=torch.float32, device=self.device).unsqueeze(1)
                 cm_t = torch.tensor(np.stack(clean_mags), dtype=torch.float32, device=self.device).unsqueeze(1)
 
                 mask    = self.model(nm_t)
                 out_mag = mask * nm_t
-                base_loss = torch.mean(torch.abs(torch.log1p(out_mag) - torch.log1p(cm_t)))
-
-                rec_list = [
-                    istft_from_mag_phase(om, ph, self.fs, self.nperseg, self.noverlap, self.pad, self.signal_len)
-                    for om, ph in zip(out_mag.squeeze(1).detach().cpu().numpy(), phases)
-                ]
-                rec_t = torch.tensor(np.stack(rec_list), device=self.device)
-                mr_loss = multi_res_stft_loss(rec_t, clean.to(self.device))
-                loss = base_loss + 0.5 * mr_loss
+                loss = loss_fn(out_mag, cm_t)
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                epoch_loss += float(loss.item())
+                epoch_loss += loss.item()
+                pbar.set_postfix(loss=f"{loss.item():.5f}")
 
-            val_loss = self._compute_val_loss()
+            val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
-                    "train/log_mae_stft": epoch_loss / len(self.train_loader),
-                    "val/log_mae_stft":   val_loss,
-                    "val/snr_db":         val_snr,
+                    "train/mse_loss": epoch_loss / len(self.train_loader),
+                    "val/mse_loss":   val_loss,
+                    "val/snr_db":     val_snr,
                 }, step=epoch)
 
             print(f"Epoch {epoch:02d}/{self.epochs} | "
@@ -319,7 +310,7 @@ if __name__ == "__main__":
     p.add_argument("--dataset",       required=True)
     p.add_argument("--noise-type",    default="non_gaussian", choices=["gaussian", "non_gaussian"])
     p.add_argument("--epochs",        type=int,   default=30)
-    p.add_argument("--batch-size",    type=int,   default=256)
+    p.add_argument("--batch-size",    type=int,   default=512)
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--nperseg",       type=int,   default=128)
     p.add_argument("--seed",          type=int,   default=42)

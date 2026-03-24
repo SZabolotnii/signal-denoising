@@ -1,4 +1,5 @@
 import argparse
+import gc
 import json
 import sys
 import uuid
@@ -23,6 +24,8 @@ try:
     WANDB_OK = True
 except Exception:
     WANDB_OK = False
+
+from tqdm import tqdm
 
 from models.hybrid_unet import HybridDSGE_UNet
 from models.dsge_layer import DSGEFeatureExtractor
@@ -53,10 +56,10 @@ class HybridUnetTrainer:
         dataset_path: Path,
         noise_type: str = 'non_gaussian',
         dsge_order: int = 3,
-        dsge_basis: str = 'fractional',
+        dsge_basis: str = 'robust',
         dsge_powers: list | None = None,
         tikhonov_lambda: float = 0.01,
-        batch_size: int = 256,
+        batch_size: int = 1024,
         epochs: int = 30,
         learning_rate: float = 1e-4,
         signal_len: int = 256,
@@ -71,7 +74,12 @@ class HybridUnetTrainer:
         self.noise_type = noise_type
         self.dsge_order = dsge_order
         self.dsge_basis = dsge_basis
-        self.dsge_powers = dsge_powers or [0.5, 1.5, 2.0]
+        # For robust basis: powers values are ignored — only len(powers) == dsge_order matters.
+        # For other bases: use provided powers or fall back to fractional defaults.
+        if dsge_basis == 'robust':
+            self.dsge_powers = list(range(dsge_order))
+        else:
+            self.dsge_powers = dsge_powers if dsge_powers is not None else [0.5, 1.5, 2.0]
         self.tikhonov_lambda = tikhonov_lambda
         self.batch_size = batch_size
         self.epochs = epochs
@@ -158,25 +166,33 @@ class HybridUnetTrainer:
     # ── preprocessing ─────────────────────────────────────────────────────────
 
     def _batch_to_4ch(self, signal_batch: np.ndarray) -> torch.Tensor:
-        """[N, T] → (B, 1+S, F, T') with normalised DSGE channels."""
-        stft_mags = []
-        dsge_mags_list = [[] for _ in range(self.dsge_order)]
+        """[N, T] → (B, 1+S, F, T') with per-signal DSGE normalisation.
+
+        Each signal's DSGE channels are scaled to match that signal's own
+        STFT magnitude, independently of batch composition.  Using a batch-level
+        reference caused a training/inference mismatch: during training batches
+        contain mixed-SNR signals so the reference is always large, but during
+        per-SNR evaluation all signals share the same SNR level, giving a
+        completely different reference → model received out-of-distribution
+        inputs → flat SNR curve despite good val metrics.
+        """
+        all_channels = []
         for s in signal_batch:
             _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            stft_mags.append(np.abs(Zxx))
-            dsge_specs = self.dsge.compute_dsge_spectrograms(s)  # [S, F, T']
-            for i in range(self.dsge_order):
-                dsge_mags_list[i].append(dsge_specs[i])
+            stft_mag = np.abs(Zxx)                              # [F, T']
+            stft_ref = stft_mag.max() + 1e-8                    # per-signal scale
 
-        stft_stack = np.stack(stft_mags)          # [B, F, T']
-        stft_ref_max = stft_stack.max() + 1e-8
-        channels = [stft_stack]
-        for i in range(self.dsge_order):
-            ch = np.stack(dsge_mags_list[i])
-            channels.append(ch * (stft_ref_max / (ch.max() + 1e-8)))
+            dsge_specs = self.dsge.compute_dsge_spectrograms(s) # [S, F, T']
+            # Normalise each DSGE channel to this signal's STFT scale
+            ch_max = dsge_specs.max(axis=(1, 2), keepdims=True) + 1e-8  # [S, 1, 1]
+            dsge_norm = dsge_specs * (stft_ref / ch_max)        # [S, F, T']
+
+            all_channels.append(
+                np.concatenate([stft_mag[np.newaxis], dsge_norm], axis=0)  # [1+S, F, T']
+            )
 
         return torch.tensor(
-            np.stack(channels, axis=1), dtype=torch.float32
+            np.stack(all_channels), dtype=torch.float32
         ).to(self.device)  # [B, 1+S, F, T']
 
     def _signal_to_clean_mag(self, signal_batch: np.ndarray) -> torch.Tensor:
@@ -247,7 +263,7 @@ class HybridUnetTrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.HuberLoss(delta=1.0)
+        loss_fn = nn.MSELoss()
         best_val_snr = float('-inf')
         best_sd = None
         train_history, val_snr_history = [], []
@@ -256,22 +272,24 @@ class HybridUnetTrainer:
             self.model.train()
             total_loss = 0.0
 
-            for noisy, clean in self.train_loader:
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
+            for noisy, clean in pbar:
                 x4 = self._batch_to_4ch(noisy.numpy())
                 clean_mag = self._signal_to_clean_mag(clean.numpy())
                 out = self.model(x4) * x4[:, 0:1, :, :]
                 loss = loss_fn(out, clean_mag)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
+                pbar.set_postfix(loss=f"{loss.item():.5f}")
 
             val_loss, val_metrics = self._evaluate_loader(self.val_loader, loss_fn)
             val_snr = self._compute_val_snr()
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
-                    'train/huber_loss': total_loss / len(self.train_loader),
-                    'val/huber_loss':   val_loss,
-                    'val/snr_db':       val_snr,
+                    'train/mse_loss': total_loss / len(self.train_loader),
+                    'val/mse_loss':   val_loss,
+                    'val/snr_db':     val_snr,
                     **{f'val/{k.lower()}': v for k, v in val_metrics.items()},
                 }, step=epoch)
 
@@ -354,16 +372,18 @@ class HybridUnetTrainer:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    p = argparse.ArgumentParser(description='Train HybridDSGE_UNet')
+    p = argparse.ArgumentParser(
+        description='Train HybridDSGE_UNet with robust basis, grid over polynomial order S'
+    )
     p.add_argument('--dataset',       required=True)
     p.add_argument('--noise-type',    default='non_gaussian', choices=['gaussian', 'non_gaussian'])
     p.add_argument('--epochs',        type=int,   default=30)
-    p.add_argument('--batch-size',    type=int,   default=256)
+    p.add_argument('--batch-size',    type=int,   default=1024)
     p.add_argument('--lr',            type=float, default=1e-4)
-    p.add_argument('--dsge-order',    type=int,   default=3)
-    p.add_argument('--dsge-basis',    type=str,   default='fractional',
+    p.add_argument('--dsge-orders',   type=int,   nargs='+', default=[3, 4, 5],
+                   help='Polynomial orders (number of basis functions) to sweep (default: 3 4 5)')
+    p.add_argument('--dsge-basis',    type=str,   default='robust',
                    choices=['fractional', 'polynomial', 'trigonometric', 'robust'])
-    p.add_argument('--dsge-powers',   type=float, nargs='+', default=None)
     p.add_argument('--lambda',        type=float, default=0.01, dest='tikhonov_lambda')
     p.add_argument('--nperseg',       type=int,   default=128)
     p.add_argument('--seed',          type=int,   default=42)
@@ -380,21 +400,59 @@ if __name__ == '__main__':
     print(f"Dataset: {dataset_path.name}")
     print(f"Config:  block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
           f"noise_type={args.noise_type}")
+    print(f"Grid:    basis={args.dsge_basis}, orders={args.dsge_orders}")
 
-    HybridUnetTrainer(
-        dataset_path=dataset_path,
-        noise_type=args.noise_type,
-        dsge_order=args.dsge_order,
-        dsge_basis=args.dsge_basis,
-        dsge_powers=args.dsge_powers,
-        tikhonov_lambda=args.tikhonov_lambda,
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        learning_rate=args.lr,
-        signal_len=cfg['block_size'],
-        fs=cfg['sample_rate'],
-        nperseg=args.nperseg,
-        noverlap=args.nperseg * 3 // 4,
-        random_state=args.seed,
-        wandb_project=args.wandb_project,
-    ).train()
+    results = []
+    for order in args.dsge_orders:
+        print(f"\n{'#' * 60}")
+        print(f"# S={order}  ({args.dsge_basis} basis)")
+        print(f"{'#' * 60}")
+        try:
+            result = HybridUnetTrainer(
+                dataset_path=dataset_path,
+                noise_type=args.noise_type,
+                dsge_order=order,
+                dsge_basis=args.dsge_basis,
+                tikhonov_lambda=args.tikhonov_lambda,
+                batch_size=args.batch_size,
+                epochs=args.epochs,
+                learning_rate=args.lr,
+                signal_len=cfg['block_size'],
+                fs=cfg['sample_rate'],
+                nperseg=args.nperseg,
+                noverlap=args.nperseg * 3 // 4,
+                random_state=args.seed,
+                wandb_project=args.wandb_project,
+            ).train()
+            results.append(result)
+        except Exception as exc:
+            print(f"ERROR S={order}: {exc}")
+            results.append({
+                'model': f'HybridDSGE_UNet_{args.dsge_basis}_S{order}',
+                'noise_type': args.noise_type,
+                'val_snr': None,
+                'test_metrics': {},
+                'error': str(exc),
+            })
+        finally:
+            gc.collect()
+            try:
+                import torch as _torch
+                _torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    # ── summary ───────────────────────────────────────────────────────────────
+    print(f"\n{'=' * 65}")
+    print(f"=== Grid summary  basis={args.dsge_basis}  noise={args.noise_type} ===")
+    print(f"{'=' * 65}")
+    print(f"  {'Model':<46} {'val SNR':>9} {'test SNR':>9}")
+    print(f"  {'-' * 64}")
+    for r in results:
+        name = r.get('model', '?')
+        if r.get('error'):
+            print(f"  {name:<46}  ERROR: {r['error'][:30]}")
+        else:
+            val_snr  = r.get('val_snr')  or float('nan')
+            test_snr = (r.get('test_metrics') or {}).get('SNR', float('nan'))
+            print(f"  {name:<46} {val_snr:>8.2f} dB {test_snr:>8.2f} dB")

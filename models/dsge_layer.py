@@ -15,6 +15,7 @@ DSGE Feature Extractor — реалізація розкладу в просто
 
 import numpy as np
 from scipy.signal import stft
+from scipy.special import erf as _erf
 
 
 # ──────────────────────────────────────────────────────
@@ -39,13 +40,38 @@ def trigonometric_basis(x: np.ndarray, freqs: list[float]) -> np.ndarray:
     return np.array([np.sin(f * x) for f in freqs])
 
 
-def robust_basis(x: np.ndarray, **kwargs) -> np.ndarray:
-    """Робастний базис: tanh, sigmoid, atan — пригнічують викиди."""
-    return np.array([
-        np.tanh(x),
-        1.0 / (1.0 + np.exp(-x)),   # sigmoid
-        np.arctan(x),
-    ])
+# Pool of robust saturation functions (ordered by diversity).
+# All suppress outliers; used in order when S > 3.
+_ROBUST_POOL = [
+    lambda x: np.tanh(x),                    # tanh         ∈ (-1, 1)
+    lambda x: 1.0 / (1.0 + np.exp(-x)),      # sigmoid      ∈ (0, 1)
+    lambda x: np.arctan(x),                   # arctan       ∈ (-π/2, π/2)
+    lambda x: x / (1.0 + np.abs(x)),          # softsign     ∈ (-1, 1)
+    lambda x: _erf(x),                        # error func   ∈ (-1, 1)
+]
+
+
+def robust_basis(x: np.ndarray, powers: list[float]) -> np.ndarray:
+    """Робастний базис насичення порядку S = len(powers).
+
+    Функції вибираються з пулу по порядку:
+      S=3: [tanh, sigmoid, arctan]
+      S=4: + softsign  x/(1+|x|)
+      S=5: + erf(x)
+
+    Parameters
+    ----------
+    x : np.ndarray
+    powers : list[float]
+        Використовується лише len(powers) — визначає кількість функцій.
+        Самі значення ігноруються (базис фіксований).
+    """
+    s = len(powers)
+    if s > len(_ROBUST_POOL):
+        raise ValueError(
+            f"robust_basis підтримує порядок до {len(_ROBUST_POOL)}, отримано {s}"
+        )
+    return np.array([_ROBUST_POOL[i](x) for i in range(s)])
 
 
 # Реєстр доступних базисів
@@ -113,10 +139,7 @@ class DSGEFeatureExtractor:
 
     def _apply_basis(self, x: np.ndarray) -> np.ndarray:
         """Застосовує базисні функції. Повертає [S, len(x)]."""
-        if self.basis_type == 'robust':
-            return self._basis_fn(x)
-        else:
-            return self._basis_fn(x, self.powers)
+        return self._basis_fn(x, self.powers)
 
     # ──────────────────────────────────────────────────
     #  Fit: навчання на тренувальних даних
@@ -132,7 +155,6 @@ class DSGEFeatureExtractor:
         noisy_signals : np.ndarray, shape [N, T]
         """
         N, T = clean_signals.shape
-        self.S = len(self.powers)
 
         clean_norm = (clean_signals - clean_signals.mean(axis=1, keepdims=True)) / (
             clean_signals.std(axis=1, keepdims=True) + 1e-8
@@ -143,6 +165,7 @@ class DSGEFeatureExtractor:
         self.psi_0 = float(clean_signals.mean())
 
         phi_all = np.array([self._apply_basis(noisy_signals[i]) for i in range(N)])  # [N, S, T]
+        self.S = phi_all.shape[1]  # actual order — correct for all basis types
         self.psi = phi_all.mean(axis=(0, 2))  # [S]
 
         phi_centered = phi_all - self.psi[np.newaxis, :, np.newaxis]

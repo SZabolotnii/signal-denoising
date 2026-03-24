@@ -37,18 +37,38 @@ except Exception:
 # before GPU memory gets fragmented by smaller models.
 ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
 
+# Per-model batch sizes tuned for ~7.6 GiB VRAM with signal_len=1024, nperseg=128.
+# STFT output shape: [B, 1, 65, 33]. Activation budgets (fwd+bwd ≈ 3× fwd):
+#   Transformer: O(T²) attention; T=1024 → B=128 uses ~6.8 GiB → already max safe.
+#   UNet:        4-level encoder (32→64→128→256 ch) + skip connections;
+#                B=2048 → e1 alone ≈ 560 MiB, total ≈ 4 GiB → OOM.  B=512 → ~1 GiB.
+#   ResNet:      3-level (16→32→64 ch); B=4096 → layer1 ≈ 560 MiB, total ≈ 3 GiB → OOM.
+#                B=1024 → ~750 MiB, safe.
+#   VAE:         Same topology as UNet + reparameterisation; B=2048 fits (measured OK).
+#   Hybrid:      4-channel spectral + DSGE preprocessing; B=1024 fits (measured OK).
+# --batch-size overrides all of these when explicitly provided.
+MODEL_BATCH_SIZES = {
+    "transformer": 128,   # O(T²) attention at T=1024; B=128 ≈ 6.8 GiB measured
+    "unet":        512,   # 4-level UNet skip activations; B=2048 OOMed → reduced 4×
+    "vae":         2048,  # UNet-like + KL; B=2048 measured OK
+    "resnet":      1024,  # 3-level ResNet; B=4096 OOMed → reduced 4×
+    "hybrid":      1024,  # 4-channel DSGE+UNet; B=1024 measured OK
+    "wavelet":     512,   # CPU-only
+}
+
 
 # ── model runners ─────────────────────────────────────────────────────────────
 
 def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
     from train.training_uae import UnetAutoencoderTrainer
     print("\n" + "=" * 60)
-    print("=== UNet (Mask + STFT, log-MAE + multi-res loss) ===")
+    print("=== UNet (Mask + STFT, MSELoss) ===")
     print("=" * 60)
+    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["unet"]
     return UnetAutoencoderTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
-        batch_size=args.batch_size,
+        batch_size=bs,
         epochs=args.epochs,
         learning_rate=args.lr,
         signal_len=cfg["block_size"],
@@ -63,12 +83,13 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
 def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
     from train.training_resnet import ResNetAutoencoderTrainer
     print("\n" + "=" * 60)
-    print("=== ResNet (STFT autoencoder, HuberLoss) ===")
+    print("=== ResNet (STFT autoencoder, MSELoss) ===")
     print("=" * 60)
+    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["resnet"]
     return ResNetAutoencoderTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
-        batch_size=args.batch_size,
+        batch_size=bs,
         epochs=args.epochs,
         learning_rate=args.lr,
         signal_len=cfg["block_size"],
@@ -82,12 +103,13 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
 def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
     from train.training_vae import VAETrainer
     print("\n" + "=" * 60)
-    print("=== VAE (SpectrogramVAE, HuberLoss + KL) ===")
+    print("=== VAE (SpectrogramVAE, MSELoss + KL) ===")
     print("=" * 60)
+    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["vae"]
     return VAETrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
-        batch_size=args.batch_size,
+        batch_size=bs,
         epochs=args.epochs,
         learning_rate=args.lr,
         signal_len=cfg["block_size"],
@@ -101,12 +123,13 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
 def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
     from train.training_transformer import TransformerTrainer
     print("\n" + "=" * 60)
-    print("=== Transformer (time-domain, HuberLoss) ===")
+    print("=== Transformer (time-domain, MSELoss) ===")
     print("=" * 60)
+    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["transformer"]
     return TransformerTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
-        batch_size=args.batch_size,
+        batch_size=bs,
         epochs=args.epochs,
         learning_rate=args.lr,
         random_state=args.seed,
@@ -141,12 +164,15 @@ def run_wavelet(dataset_dir: Path, cfg: dict, args) -> dict | None:
 def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
     from train.training_hybrid import HybridUnetTrainer
     print("\n" + "=" * 60)
-    print("=== HybridDSGE_UNet (DSGE + U-Net mask, HuberLoss) ===")
+    print("=== HybridDSGE_UNet (robust basis S=3, U-Net mask, MSELoss) ===")
     print("=" * 60)
+    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["hybrid"]
     return HybridUnetTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
-        batch_size=args.batch_size,
+        dsge_order=3,
+        dsge_basis='robust',
+        batch_size=bs,
         epochs=args.epochs,
         learning_rate=args.lr,
         signal_len=cfg["block_size"],
@@ -238,7 +264,8 @@ def parse_args():
     p.add_argument("--models",        default="all",
                    help=f"Comma-separated or 'all'. Options: {', '.join(ALL_MODELS)}")
     p.add_argument("--epochs",        type=int,   default=50)
-    p.add_argument("--batch-size",    type=int,   default=256)
+    p.add_argument("--batch-size",    type=int,   default=None,
+                   help="Override batch size for all models (default: per-model from MODEL_BATCH_SIZES)")
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--nperseg",       type=int,   default=128,
                    help="STFT window size for spectral models (default 128 for 1024-sample signals)")
@@ -302,6 +329,7 @@ def main():
             except Exception as exc:
                 print(f"ERROR training {m} ({noise_type}): {exc}")
                 results.append({'model': m, 'noise_type': noise_type, 'error': str(exc)})
+                exc.__traceback__ = None  # release GPU tensor refs held in traceback frames
             finally:
                 gc.collect()
                 try:

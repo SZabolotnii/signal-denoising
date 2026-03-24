@@ -24,6 +24,8 @@ try:
 except Exception:
     WANDB_OK = False
 
+from tqdm import tqdm
+
 from models.autoencoder_vae import SpectrogramVAE
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
 from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
@@ -33,7 +35,7 @@ MODEL_NAME = 'SpectrogramVAE'
 
 class VAETrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=256, epochs=50, learning_rate=1e-4,
+                 batch_size=2048, epochs=50, learning_rate=1e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
                  wandb_project=""):
         self.dataset_path = Path(dataset_path)
@@ -166,8 +168,7 @@ class VAETrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        # HuberLoss with reduction="sum" to keep the same scale as original MSELoss(sum)
-        loss_fn = nn.HuberLoss(delta=1.0, reduction="sum")
+        loss_fn = nn.MSELoss(reduction="sum")
         best_val_snr = float("-inf")
         best_sd = None
         train_history, val_snr_history = [], []
@@ -176,22 +177,24 @@ class VAETrainer:
             self.model.train()
             total_loss = 0.0
 
-            for X_batch, _ in self.train_loader:
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
+            for X_batch, _ in pbar:
                 spec = self._signal_to_mag_tensor(X_batch.to(self.device))
                 recon, mu, logvar = self.model(spec)
                 kl   = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
                 loss = (loss_fn(recon, spec) + kl) / spec.size(0)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
+                pbar.set_postfix(loss=f"{loss.item():.5f}")
 
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
-                    "train/huber_kl_loss": total_loss / len(self.train_loader),
-                    "val/huber_kl_loss":   val_loss,
-                    "val/snr_db":          val_snr,
+                    "train/mse_kl_loss": total_loss / len(self.train_loader),
+                    "val/mse_kl_loss":   val_loss,
+                    "val/snr_db":        val_snr,
                 }, step=epoch)
 
             print(f"Epoch {epoch:02d}/{self.epochs} | "
@@ -270,7 +273,7 @@ if __name__ == "__main__":
     p.add_argument("--dataset",       required=True)
     p.add_argument("--noise-type",    default="non_gaussian", choices=["gaussian", "non_gaussian"])
     p.add_argument("--epochs",        type=int,   default=50)
-    p.add_argument("--batch-size",    type=int,   default=256)
+    p.add_argument("--batch-size",    type=int,   default=2048)
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--nperseg",       type=int,   default=128)
     p.add_argument("--seed",          type=int,   default=42)
