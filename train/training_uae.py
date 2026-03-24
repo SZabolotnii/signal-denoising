@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,6 +90,7 @@ class UnetAutoencoderTrainer:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         self.run_id = uuid.uuid4().hex[:8]
+        self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
 
         if WANDB_OK and wandb_project:
@@ -245,7 +247,7 @@ class UnetAutoencoderTrainer:
                 best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
         # ── save ──────────────────────────────────────────────────────────────
-        run_dir = self.dataset_path / "weights" / "runs" / f"{MODEL_NAME}_{self.noise_type}"
+        run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
         save_path = run_dir / "model_best.pth"
         save_training_curves(

@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -52,6 +53,7 @@ class VAETrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.run_id = uuid.uuid4().hex[:8]
+        self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
 
         if WANDB_OK and wandb_project:
@@ -156,11 +158,12 @@ class VAETrainer:
         self.model.eval()
         total = 0.0
         with torch.no_grad():
-            for X_batch, _ in self.val_loader:
-                spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                recon, mu, logvar = self.model(spec)
+            for X_batch, y_batch in self.val_loader:
+                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
+                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
+                recon, mu, logvar = self.model(noisy_spec)
                 kl   = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                loss = (loss_fn(recon, spec) + kl) / spec.size(0)
+                loss = (loss_fn(recon, clean_spec) + kl) / noisy_spec.size(0)
                 total += loss.item()
         return total / len(self.val_loader)
 
@@ -178,11 +181,12 @@ class VAETrainer:
             total_loss = 0.0
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
-            for X_batch, _ in pbar:
-                spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                recon, mu, logvar = self.model(spec)
+            for X_batch, y_batch in pbar:
+                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
+                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
+                recon, mu, logvar = self.model(noisy_spec)
                 kl   = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                loss = (loss_fn(recon, spec) + kl) / spec.size(0)
+                loss = (loss_fn(recon, clean_spec) + kl) / noisy_spec.size(0)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
@@ -208,7 +212,7 @@ class VAETrainer:
                 best_val_snr = val_snr
                 best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
 
-        run_dir = self.dataset_path / "weights" / "runs" / f"{MODEL_NAME}_{self.noise_type}"
+        run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
         save_path = run_dir / "model_best.pth"
         save_training_curves(

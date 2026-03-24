@@ -148,7 +148,11 @@ def run_wavelet(dataset_dir: Path, cfg: dict, args) -> dict | None:
     best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean, random_state=args.seed)
     print(f"  Best params: {best_params}")
     print(f"  Val MSE: {val_mse:.6f}  Test MSE: {test_mse:.6f}")
-    run_dir = dataset_dir / "weights" / "runs" / f"Wavelet_{args.noise_type}"
+    from datetime import datetime
+    import uuid as _uuid
+    _run_date = datetime.now().strftime("%Y%m%d")
+    _run_id   = _uuid.uuid4().hex[:8]
+    run_dir = dataset_dir / "weights" / "runs" / f"run_{_run_date}_{_run_id}_Wavelet_{args.noise_type}"
     run_dir.mkdir(parents=True, exist_ok=True)
     save_path = run_dir / "best_params.json"
     with open(save_path, "w") as f:

@@ -16,7 +16,7 @@ class SignalDatasetGenerator:
 
     Noise profiles:
       - Gaussian (AWGN) — baseline
-      - Non-Gaussian (polygauss, polygauss_nonstationary, impulse, pink, red)
+      - Non-Gaussian (polygauss, impulse, pink, red)
 
     Signal is a real-valued simulated baseband/IF waveform.
     block_size defines samples per training example;
@@ -45,7 +45,7 @@ class SignalDatasetGenerator:
     }
 
     NON_GAUSSIAN_NOISE_TYPES = (
-        "impulse", "pink", "red", "polygauss", "polygauss_nonstationary",
+        "impulse", "pink", "red", "polygauss",
     )
 
     VALID_MODULATIONS = tuple(MODULATION_DEFAULTS.keys())
@@ -57,9 +57,9 @@ class SignalDatasetGenerator:
         num_samples: int,
         sample_rate: int = 8192,
         block_size: int = 1024,
-        scenario: str = "deep_space",
-        modulation_type: str = "bpsk",
-        bits_per_symbol: int = 1,
+        scenario: str = "fpv_telemetry",
+        modulation_type: str = "qpsk",
+        bits_per_symbol: int = 2,
         snr_range: tuple[float, float] | None = None,
         non_gaussian_noise_types: list[str] | None = None,
         non_gaussian_mix_mode: str = "fixed",
@@ -83,7 +83,7 @@ class SignalDatasetGenerator:
                                      4 → 16-PSK / 16-FSK
                                      8 → 256-PSK / 256-FSK
         snr_range                : (min_dB, max_dB), overrides scenario default
-        non_gaussian_noise_types : noise types to use; default ["polygauss_nonstationary"]
+        non_gaussian_noise_types : noise types to use; default ["polygauss"]
         non_gaussian_mix_mode    : "fixed" = all types summed; "random" = random subset per sample
         polygauss_components     : fixed number of GMM components K (default 3)
         polygauss_random_k       : (k_min, k_max) — randomise K per sample; overrides
@@ -98,7 +98,7 @@ class SignalDatasetGenerator:
             f"Unknown modulation_type: {modulation_type!r}. Choose from {self.VALID_MODULATION_TYPES}"
 
         if non_gaussian_noise_types is None:
-            non_gaussian_noise_types = ["polygauss_nonstationary"]
+            non_gaussian_noise_types = ["polygauss"]
         unknown = set(non_gaussian_noise_types) - set(self.NON_GAUSSIAN_NOISE_TYPES)
         assert not unknown, f"Unknown noise types: {unknown}. Available: {self.NON_GAUSSIAN_NOISE_TYPES}"
 
@@ -313,66 +313,6 @@ class SignalDatasetGenerator:
     # Noise
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _ou_trajectories(self, n: int, K: int, theta: float, sigma: float) -> np.ndarray:
-        """
-        K independent Ornstein-Uhlenbeck trajectories of length n.
-
-        Discrete recursion: x[t] = α·x[t−1] + β·ε[t]
-          α = 1 − θ·dt,  β = σ·√dt
-        Implemented via scipy.signal.lfilter — O(n·K), no Python loop.
-        Correlation time: τ = 1/θ seconds.
-
-        Returns (K, n).
-        """
-        from scipy.signal import lfilter
-        dt    = 1.0 / self.sample_rate
-        alpha = max(0.0, 1.0 - theta * dt)
-        beta  = sigma * np.sqrt(dt)
-        eps   = np.random.randn(K, n)
-        return lfilter([beta], [1.0, -alpha], eps, axis=1)
-
-    def _polygauss_nonstationary_component(self, n: int, K: int) -> np.ndarray:
-        """
-        Non-stationary polygaussian noise: K-component GMM whose parameters
-        drift smoothly via Ornstein-Uhlenbeck processes.
-
-        Step 1 — Parameter trajectories:
-          Weights  w_k(t): softmax(OU) → w_k ∈ (0,1), Σw_k = 1
-          Std devs σ_k(t): exp(OU + offset_k) > 0; log-offsets spread from
-                           background noise (−0.5) to impulsive (+1.0)
-          Means    μ_k(t): K−1 free OU trajectories + zero-mean constraint on μ_K
-
-        Step 2 — Vectorised sample generation:
-          Roulette-wheel selection of active component k(t);
-          sample from N(μ_{k(t)}, σ²_{k(t)}).
-        """
-        assert K >= 3, "K must be >= 3 for polygauss_nonstationary"
-
-        logits  = self._ou_trajectories(n, K, theta=8.0, sigma=3.0)
-        logits -= logits.max(axis=0)
-        exp_l   = np.exp(logits)
-        weights = exp_l / exp_l.sum(axis=0)
-
-        log_var = self._ou_trajectories(n, K, theta=5.0, sigma=2.0)
-        offsets = np.linspace(-0.5, 0.5, K)
-        stds    = np.exp(log_var + offsets[:, np.newaxis])
-
-        means         = np.zeros((K, n))
-        means[:K - 1] = self._ou_trajectories(n, K - 1, theta=10.0, sigma=2.0)
-        means[K - 1]  = (
-            -np.sum(weights[:K - 1] * means[:K - 1], axis=0)
-            / (weights[K - 1] + 1e-9)
-        )
-
-        cum_w = np.cumsum(weights, axis=0)
-        u     = np.random.uniform(0.0, 1.0, n)
-        k_idx = (cum_w < u[np.newaxis, :]).sum(axis=0).clip(0, K - 1)
-
-        t_idx          = np.arange(n)
-        selected_means = means[k_idx, t_idx]
-        selected_stds  = stds[k_idx, t_idx]
-        return selected_means + selected_stds * np.random.randn(n)
-
     def _noise_std_for_snr(self, signal: np.ndarray, snr_db: float) -> float:
         """RMS noise amplitude for target SNR [dB]."""
         signal_power = np.mean(signal ** 2)
@@ -395,7 +335,7 @@ class SignalDatasetGenerator:
           - "pink"                  : 1/f noise, spectral slope ≈ −10 dB/dec
           - "red"                   : 1/f² noise, slope ≈ −20 dB/dec
           - "polygauss"             : stationary GMM, K = _n_polygauss_components()
-          - "polygauss_nonstationary": GMM with OU-drifting parameters, same K logic
+
 
         Modes (non_gaussian_mix_mode):
           - "fixed"  : all listed types combined
@@ -441,10 +381,6 @@ class SignalDatasetGenerator:
                     (np.random.normal(means[c], stds[c]) for c in choices),
                     dtype=float, count=n,
                 )
-
-            elif noise_type == "polygauss_nonstationary":
-                K         = max(self._n_polygauss_components(), 3)
-                component = self._polygauss_nonstationary_component(n, K=K)
 
             noise += component
 
@@ -642,7 +578,7 @@ class DatasetExplorer:
 #
 #   python datasets/generation.py                                 # defaults
 #   python datasets/generation.py --deep_space --polygauss
-#   python datasets/generation.py --fpv --polygauss_nonstationary --modulation gfsk
+#   python datasets/generation.py --fpv --polygauss --modulation qpsk
 #   python datasets/generation.py --deep_space --polygauss --bits_per_symbol 2
 #   python datasets/generation.py --help
 #
@@ -660,11 +596,11 @@ if __name__ == "__main__":
     scenario_group = parser.add_mutually_exclusive_group()
     scenario_group.add_argument(
         "--deep_space", action="store_true",
-        help="Deep space: BPSK/QPSK, SNR −20..0 dB  [default]",
+        help="Deep space: BPSK/QPSK, SNR −20..0 dB",
     )
     scenario_group.add_argument(
         "--fpv", action="store_true",
-        help="FPV telemetry: QPSK/CPFSK/GFSK, SNR −5..+15 dB",
+        help="FPV telemetry: QPSK/CPFSK/GFSK, SNR −5..+15 dB  [default]",
     )
 
     # Noise type
@@ -678,10 +614,6 @@ if __name__ == "__main__":
         help="Non-Gaussian noise: polygauss + impulse (fixed combination)",
     )
     noise_group.add_argument(
-        "--polygauss_nonstationary", action="store_true",
-        help="Non-Gaussian noise: non-stationary polygauss via Ornstein-Uhlenbeck  [default]",
-    )
-    noise_group.add_argument(
         "--all_noise", action="store_true",
         help="Non-Gaussian noise: impulse + pink + red + polygauss (random subset)",
     )
@@ -690,13 +622,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--modulation_type",
         choices=SignalDatasetGenerator.VALID_MODULATION_TYPES,
-        default="bpsk",
-        help="Modulation used for all signals (default: bpsk).\n"
+        default="qpsk",
+        help="Modulation used for all signals (default: qpsk).\n"
              "'random' — pick randomly from scenario's list per signal.",
     )
     parser.add_argument(
-        "--bits_per_symbol", type=int, default=1,
-        help="log₂(M): constellation/alphabet size M = 2^bps (default: 1)",
+        "--bits_per_symbol", type=int, default=2,
+        help="log₂(M): constellation/alphabet size M = 2^bps (default: 2)",
     )
     parser.add_argument(
         "--block_size", type=int, default=1024,
@@ -734,18 +666,14 @@ if __name__ == "__main__":
         NOISE_TYPES = ["polygauss"]
         MIX_MODE    = "fixed"
         noise_tag   = "polygauss"
-    elif args.polygauss_nonstationary:
-        NOISE_TYPES = ["polygauss_nonstationary"]
-        MIX_MODE    = "fixed"
-        noise_tag   = "polygauss_nonstationary"
     elif args.all_noise:
         NOISE_TYPES = ["impulse", "pink", "red", "polygauss"]
         MIX_MODE    = "random"
         noise_tag   = "all_noise"
-    else:  # default: polygauss_nonstationary
-        NOISE_TYPES = ["polygauss_nonstationary"]
+    else:  # default: polygauss
+        NOISE_TYPES = ["polygauss"]
         MIX_MODE    = "fixed"
-        noise_tag   = "polygauss_nonstationary"
+        noise_tag   = "polygauss"
 
     BLOCK_SIZE      = args.block_size
     SAMPLE_RATE     = 8192
