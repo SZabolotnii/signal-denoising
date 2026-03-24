@@ -77,6 +77,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
         noverlap=args.nperseg * 3 // 4,
         random_state=args.seed,
         wandb_project=args.wandb_project,
+        data_fraction=args.partial_train,
     ).train()
 
 
@@ -97,6 +98,7 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
         nperseg=args.nperseg,
         random_state=args.seed,
         wandb_project=args.wandb_project,
+        data_fraction=args.partial_train,
     ).train()
 
 
@@ -117,6 +119,7 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
         nperseg=args.nperseg,
         random_state=args.seed,
         wandb_project=args.wandb_project,
+        data_fraction=args.partial_train,
     ).train()
 
 
@@ -134,6 +137,7 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
         learning_rate=args.lr,
         random_state=args.seed,
         wandb_project=args.wandb_project,
+        data_fraction=args.partial_train,
     ).train()
 
 
@@ -145,6 +149,9 @@ def run_wavelet(dataset_dir: Path, cfg: dict, args) -> dict | None:
     print("=" * 60)
     noisy = np.load(dataset_dir / "train" / f"{args.noise_type}_signals.npy")
     clean = np.load(dataset_dir / "train" / "clean_signals.npy")
+    if args.partial_train < 1.0:
+        n = max(1, int(len(noisy) * args.partial_train))
+        noisy, clean = noisy[:n], clean[:n]
     best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean, random_state=args.seed)
     print(f"  Best params: {best_params}")
     print(f"  Val MSE: {val_mse:.6f}  Test MSE: {test_mse:.6f}")
@@ -185,6 +192,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         noverlap=args.nperseg * 3 // 4,
         random_state=args.seed,
         wandb_project=args.wandb_project,
+        data_fraction=args.partial_train,
     ).train()
 
 
@@ -276,6 +284,8 @@ def parse_args():
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--wandb-project", default="",
                    help="W&B project name (empty = disable)")
+    p.add_argument("--partial-train", type=float, default=1.0, metavar="FRACTION",
+                   help="Fraction of dataset to use (0 < f <= 1). Useful for quick debug runs.")
     return p.parse_args()
 
 
@@ -299,8 +309,12 @@ def main():
         ["gaussian", "non_gaussian"] if args.noise_types == "all"
         else [n.strip() for n in args.noise_types.split(",")]
     )
+    if not (0.0 < args.partial_train <= 1.0):
+        print(f"ERROR: --partial-train must be in (0, 1], got {args.partial_train}")
+        sys.exit(1)
     print(f"Training: noise_types={noise_types}, epochs={args.epochs}, "
-          f"batch={args.batch_size}, lr={args.lr}")
+          f"batch={args.batch_size}, lr={args.lr}"
+          + (f", partial={args.partial_train:.0%}" if args.partial_train < 1.0 else ""))
 
     weights_dir = dataset_dir / "weights"
     weights_dir.mkdir(exist_ok=True)

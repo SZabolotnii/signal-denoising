@@ -38,7 +38,7 @@ class VAETrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
                  batch_size=2048, epochs=50, learning_rate=1e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
-                 wandb_project=""):
+                 wandb_project="", data_fraction=1.0):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.batch_size = batch_size
@@ -50,6 +50,7 @@ class VAETrainer:
         self.noverlap = nperseg * 3 // 4   # 75% overlap (Hann COLA satisfied)
         self.pad = nperseg // 2
         self.random_state = random_state
+        self.data_fraction = data_fraction
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.run_id = uuid.uuid4().hex[:8]
@@ -87,6 +88,9 @@ class VAETrainer:
     def load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
+        if self.data_fraction < 1.0:
+            n = max(1, int(len(noisy) * self.data_fraction))
+            noisy, clean = noisy[:n], clean[:n]
         assert noisy.shape[1] == self.signal_len
 
         X = torch.tensor(noisy[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
@@ -173,9 +177,10 @@ class VAETrainer:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         loss_fn = nn.MSELoss(reduction="sum")
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', patience=3, factor=0.5, min_delta=0.01
+            optimizer, mode='min', patience=3, factor=0.5, threshold=0.01
         )
-        best_val_snr = float("-inf")
+        best_val_loss = float("inf")
+        best_val_snr  = float("-inf")
         best_sd = None
         train_history, val_snr_history = [], []
         no_improve = 0
@@ -199,7 +204,7 @@ class VAETrainer:
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
 
-            scheduler.step(val_snr)
+            scheduler.step(val_loss)
             lr_now = optimizer.param_groups[0]['lr']
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
@@ -218,8 +223,9 @@ class VAETrainer:
             train_history.append(total_loss / len(self.train_loader))
             val_snr_history.append(val_snr)
 
-            if val_snr > best_val_snr:
-                best_val_snr = val_snr
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_val_snr  = val_snr
                 best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
                 no_improve = 0
             else:

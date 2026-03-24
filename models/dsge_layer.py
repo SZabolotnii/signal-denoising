@@ -164,7 +164,7 @@ class DSGEFeatureExtractor:
 
         self.psi_0 = float(clean_signals.mean())
 
-        phi_all = np.array([self._apply_basis(noisy_signals[i]) for i in range(N)])  # [N, S, T]
+        phi_all = self._basis_fn(noisy_signals, self.powers).transpose(1, 0, 2)  # [N, S, T]
         self.S = phi_all.shape[1]  # actual order — correct for all basis types
         self.psi = phi_all.mean(axis=(0, 2))  # [S]
 
