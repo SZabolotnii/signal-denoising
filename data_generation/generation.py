@@ -115,14 +115,16 @@ class SignalDatasetGenerator:
         self.polygauss_components     = polygauss_components
         self.polygauss_random_k       = polygauss_random_k
         self._signal_len              = block_size
+        self._t                       = np.linspace(
+            0, block_size / sample_rate, block_size, endpoint=False
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Utilities
     # ──────────────────────────────────────────────────────────────────────────
 
     def _time_vector(self) -> np.ndarray:
-        duration = self.block_size / self.sample_rate
-        return np.linspace(0, duration, self.block_size, endpoint=False)
+        return self._t
 
     def _random_carrier(self, modulation: str) -> float:
         return random.uniform(*self.MODULATION_DEFAULTS[modulation]["carrier_range"])
@@ -173,13 +175,14 @@ class SignalDatasetGenerator:
         symbol_indices = np.random.randint(0, M, num_symbols)
         symbol_phases  = 2 * np.pi * symbol_indices / M
 
-        signal = np.zeros(self._signal_len)
-        for i, phase in enumerate(symbol_phases):
-            start = int(i * samples_per_symbol)
-            end   = min(int((i + 1) * samples_per_symbol), self._signal_len)
-            signal[start:end] = amplitude * np.cos(
-                2 * np.pi * carrier_freq * t[start:end] + phase
+        phase_sequence = np.repeat(
+            symbol_phases, int(round(samples_per_symbol))
+        )[: self._signal_len]
+        if len(phase_sequence) < self._signal_len:
+            phase_sequence = np.pad(
+                phase_sequence, (0, self._signal_len - len(phase_sequence)), mode="edge"
             )
+        signal = amplitude * np.cos(2 * np.pi * carrier_freq * t + phase_sequence)
         return t, signal
 
     def generate_bpsk_signal(
@@ -368,7 +371,8 @@ class SignalDatasetGenerator:
 
             elif noise_type == "red":
                 white     = np.random.randn(n)
-                component = np.cumsum(np.cumsum(white))
+                np.cumsum(white, out=white)
+                component = np.cumsum(white)
                 component /= np.max(np.abs(component)) + 1e-9
 
             elif noise_type == "polygauss":
@@ -377,10 +381,7 @@ class SignalDatasetGenerator:
                 means   = np.random.uniform(-2.0, 2.0, k)
                 stds    = np.random.uniform(0.3, 1.5, k)
                 choices = np.random.choice(k, size=n, p=weights)
-                component = np.fromiter(
-                    (np.random.normal(means[c], stds[c]) for c in choices),
-                    dtype=float, count=n,
-                )
+                component = np.random.normal(means[choices], stds[choices])
 
             noise += component
 
@@ -429,26 +430,25 @@ class SignalDatasetGenerator:
         non_gaussian_noise_only: (N, block_size)  pure noise component
         snr_values             : (N,)
         """
-        clean_list, gauss_list, non_gauss_list, noise_list, snr_list = [], [], [], [], []
+        N, L = self.num_samples, self.block_size
+        clean          = np.empty((N, L), dtype=np.float32)
+        gaussian_noisy = np.empty((N, L), dtype=np.float32)
+        non_gauss      = np.empty((N, L), dtype=np.float32)
+        noise_only     = np.empty((N, L), dtype=np.float32)
+        snr_values     = np.empty(N,      dtype=np.float32)
 
-        for _ in tqdm(range(self.num_samples), desc="Generating train datasets", unit="sig"):
+        for i in tqdm(range(N), desc="Generating train datasets", unit="sig"):
             signal = self._generate_signal()
             snr_db = random.uniform(*self.snr_range)
             noise  = self._generate_non_gaussian_noise(signal, snr_db)
 
-            clean_list.append(signal)
-            gauss_list.append(self._add_gaussian_noise(signal, snr_db))
-            non_gauss_list.append(signal + noise)
-            noise_list.append(noise)
-            snr_list.append(snr_db)
+            clean[i]          = signal
+            gaussian_noisy[i] = self._add_gaussian_noise(signal, snr_db)
+            non_gauss[i]      = signal + noise
+            noise_only[i]     = noise
+            snr_values[i]     = snr_db
 
-        return (
-            np.array(clean_list),
-            np.array(gauss_list),
-            np.array(non_gauss_list),
-            np.array(noise_list),
-            np.array(snr_list),
-        )
+        return clean, gaussian_noisy, non_gauss, noise_only, snr_values
 
     def generate_test_dataset(
         self,
@@ -467,22 +467,27 @@ class SignalDatasetGenerator:
 
         result: dict[float, dict[str, np.ndarray]] = {}
 
+        N, L = samples_per_snr, self.block_size
         for snr_db in tqdm(snr_values, desc="Generating test datasets", unit="SNR"):
-            clean_list, gauss_list, non_gauss_list, noise_list = [], [], [], []
-            for _ in tqdm(range(samples_per_snr), desc=f"  SNR={snr_db:+.0f} dB",
+            clean_arr     = np.empty((N, L), dtype=np.float32)
+            gauss_arr     = np.empty((N, L), dtype=np.float32)
+            non_gauss_arr = np.empty((N, L), dtype=np.float32)
+            noise_arr     = np.empty((N, L), dtype=np.float32)
+
+            for i in tqdm(range(N), desc=f"  SNR={snr_db:+.0f} dB",
                           unit="sig", leave=False):
                 signal = self._generate_signal()
-                noise = self._generate_non_gaussian_noise(signal, snr_db)
-                clean_list.append(signal)
-                gauss_list.append(self._add_gaussian_noise(signal, snr_db))
-                non_gauss_list.append(signal + noise)
-                noise_list.append(noise)
+                noise  = self._generate_non_gaussian_noise(signal, snr_db)
+                clean_arr[i]     = signal
+                gauss_arr[i]     = self._add_gaussian_noise(signal, snr_db)
+                non_gauss_arr[i] = signal + noise
+                noise_arr[i]     = noise
 
             result[float(snr_db)] = {
-                "clean":                    np.array(clean_list),
-                "gaussian":                 np.array(gauss_list),
-                "non_gaussian":             np.array(non_gauss_list),
-                "non_gaussian_noise_only":  np.array(noise_list),
+                "clean":                    clean_arr,
+                "gaussian":                 gauss_arr,
+                "non_gaussian":             non_gauss_arr,
+                "non_gaussian_noise_only":  noise_arr,
             }
 
         return result
