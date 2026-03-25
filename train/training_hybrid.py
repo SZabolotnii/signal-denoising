@@ -71,6 +71,7 @@ class HybridUnetTrainer:
         wandb_project: str = '',
         device: str | None = None,
         data_fraction: float = 1.0,
+        output_dir=None,
     ):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
@@ -92,6 +93,7 @@ class HybridUnetTrainer:
         self.noverlap = noverlap
         self.random_state = random_state
         self.data_fraction = data_fraction
+        self.output_dir = Path(output_dir) if output_dir is not None else None
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.run_id = uuid.uuid4().hex[:8]
@@ -239,7 +241,7 @@ class HybridUnetTrainer:
 
     def _compute_val_snr(self) -> float:
         all_true, all_pred = [], []
-        for noisy, clean in self.val_loader:
+        for noisy, clean in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
             all_pred.append(self.denoise_numpy(noisy.numpy()))
             all_true.append(clean.numpy())
         return float(SignalToNoiseRatio.calculate(
@@ -251,7 +253,7 @@ class HybridUnetTrainer:
         total_loss = 0.0
         all_true, all_pred = [], []
         with torch.no_grad():
-            for noisy, clean in loader:
+            for noisy, clean in tqdm(loader, desc="  val loss", leave=False, unit="batch"):
                 x4 = self._batch_to_4ch(noisy.numpy())
                 clean_mag = self._signal_to_clean_mag(clean.numpy())
                 out = self.model(x4) * x4[:, 0:1, :, :]
@@ -284,6 +286,8 @@ class HybridUnetTrainer:
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             total_loss = 0.0
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
             for noisy, clean in pbar:
@@ -294,6 +298,9 @@ class HybridUnetTrainer:
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
+
+            vram_str = (f" | vram={torch.cuda.max_memory_allocated() / 1024**3:.2f}GB"
+                        if torch.cuda.is_available() else "")
 
             val_loss, val_metrics = self._evaluate_loader(self.val_loader, loss_fn)
             val_snr = self._compute_val_snr()
@@ -313,7 +320,7 @@ class HybridUnetTrainer:
             print(f"Epoch {epoch:02d}/{self.epochs} | "
                   f"train={total_loss / len(self.train_loader):.5f} | "
                   f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB | "
-                  f"lr={lr_now:.2e}")
+                  f"lr={lr_now:.2e}{vram_str}")
 
             train_history.append(total_loss / len(self.train_loader))
             val_snr_history.append(val_snr)
@@ -330,7 +337,10 @@ class HybridUnetTrainer:
                     break
 
         # ── save ──────────────────────────────────────────────────────────────
-        run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{self.model_name}_{self.noise_type}"
+        if self.output_dir is not None:
+            run_dir = self.output_dir / f"{self.model_name}_{self.noise_type}"
+        else:
+            run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{self.model_name}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         model_path = run_dir / "model_best.pth"

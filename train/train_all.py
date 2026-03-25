@@ -17,6 +17,7 @@ import argparse
 import gc
 import json
 import sys
+import uuid as _uuid_mod
 from datetime import datetime
 from pathlib import Path
 
@@ -56,6 +57,21 @@ MODEL_BATCH_SIZES = {
     "wavelet":     512,   # CPU-only
 }
 
+# Per-model default learning rates.
+# Transformer needs a 10× higher LR — at 1e-4 it stalls at epoch 1 (loss ≈ E[x²],
+# meaning it outputs near-zero and never escapes that plateau).
+# All other models converge well but reach the fine-tuning plateau only after many
+# epochs at 1e-4; 3e-4 shortens the initial descent without causing instability.
+# --lr overrides all of these when explicitly provided.
+MODEL_LEARNING_RATES = {
+    "transformer": 1e-3,  # stuck at 1e-4; 10× increase needed to escape init plateau
+    "unet":        3e-4,
+    "vae":         3e-4,
+    "resnet":      3e-4,
+    "hybrid":      3e-4,
+    "wavelet":     None,  # not applicable (grid search)
+}
+
 
 # ── model runners ─────────────────────────────────────────────────────────────
 
@@ -65,12 +81,13 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
     print("=== UNet (Mask + STFT, MSELoss) ===")
     print("=" * 60)
     bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["unet"]
+    lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["unet"]
     return UnetAutoencoderTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
         batch_size=bs,
         epochs=args.epochs,
-        learning_rate=args.lr,
+        learning_rate=lr,
         signal_len=cfg["block_size"],
         fs=cfg["sample_rate"],
         nperseg=args.nperseg,
@@ -78,6 +95,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
         random_state=args.seed,
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
+        output_dir=args.shared_run_dir,
     ).train()
 
 
@@ -87,18 +105,20 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
     print("=== ResNet (STFT autoencoder, MSELoss) ===")
     print("=" * 60)
     bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["resnet"]
+    lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["resnet"]
     return ResNetAutoencoderTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
         batch_size=bs,
         epochs=args.epochs,
-        learning_rate=args.lr,
+        learning_rate=lr,
         signal_len=cfg["block_size"],
         fs=cfg["sample_rate"],
         nperseg=args.nperseg,
         random_state=args.seed,
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
+        output_dir=args.shared_run_dir,
     ).train()
 
 
@@ -108,18 +128,20 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
     print("=== VAE (SpectrogramVAE, MSELoss + KL) ===")
     print("=" * 60)
     bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["vae"]
+    lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["vae"]
     return VAETrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
         batch_size=bs,
         epochs=args.epochs,
-        learning_rate=args.lr,
+        learning_rate=lr,
         signal_len=cfg["block_size"],
         fs=cfg["sample_rate"],
         nperseg=args.nperseg,
         random_state=args.seed,
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
+        output_dir=args.shared_run_dir,
     ).train()
 
 
@@ -129,15 +151,17 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
     print("=== Transformer (time-domain, MSELoss) ===")
     print("=" * 60)
     bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["transformer"]
+    lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["transformer"]
     return TransformerTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
         batch_size=bs,
         epochs=args.epochs,
-        learning_rate=args.lr,
+        learning_rate=lr,
         random_state=args.seed,
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
+        output_dir=args.shared_run_dir,
     ).train()
 
 
@@ -155,11 +179,7 @@ def run_wavelet(dataset_dir: Path, cfg: dict, args) -> dict | None:
     best_params, val_mse, test_mse = grid_search_wavelet(noisy, clean, random_state=args.seed)
     print(f"  Best params: {best_params}")
     print(f"  Val MSE: {val_mse:.6f}  Test MSE: {test_mse:.6f}")
-    from datetime import datetime
-    import uuid as _uuid
-    _run_date = datetime.now().strftime("%Y%m%d")
-    _run_id   = _uuid.uuid4().hex[:8]
-    run_dir = dataset_dir / "weights" / "runs" / f"run_{_run_date}_{_run_id}_Wavelet_{args.noise_type}"
+    run_dir = args.shared_run_dir / f"Wavelet_{args.noise_type}"
     run_dir.mkdir(parents=True, exist_ok=True)
     save_path = run_dir / "best_params.json"
     with open(save_path, "w") as f:
@@ -178,6 +198,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
     print("=== HybridDSGE_UNet (robust basis S=3, U-Net mask, MSELoss) ===")
     print("=" * 60)
     bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["hybrid"]
+    lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["hybrid"]
     return HybridUnetTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
@@ -185,7 +206,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         dsge_basis='robust',
         batch_size=bs,
         epochs=args.epochs,
-        learning_rate=args.lr,
+        learning_rate=lr,
         signal_len=cfg["block_size"],
         fs=cfg["sample_rate"],
         nperseg=args.nperseg,
@@ -193,6 +214,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         random_state=args.seed,
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
+        output_dir=args.shared_run_dir,
     ).train()
 
 
@@ -278,7 +300,8 @@ def parse_args():
     p.add_argument("--epochs",        type=int,   default=50)
     p.add_argument("--batch-size",    type=int,   default=None,
                    help="Override batch size for all models (default: per-model from MODEL_BATCH_SIZES)")
-    p.add_argument("--lr",            type=float, default=1e-4)
+    p.add_argument("--lr",            type=float, default=None,
+                   help="Learning rate override for all models (default: per-model from MODEL_LEARNING_RATES)")
     p.add_argument("--nperseg",       type=int,   default=128,
                    help="STFT window size for spectral models (default 128 for 1024-sample signals)")
     p.add_argument("--seed",          type=int,   default=42)
@@ -312,12 +335,20 @@ def main():
     if not (0.0 < args.partial_train <= 1.0):
         print(f"ERROR: --partial-train must be in (0, 1], got {args.partial_train}")
         sys.exit(1)
+    lr_display = f"{args.lr}" if args.lr is not None else "per-model"
     print(f"Training: noise_types={noise_types}, epochs={args.epochs}, "
-          f"batch={args.batch_size}, lr={args.lr}"
+          f"batch={args.batch_size}, lr={lr_display}"
           + (f", partial={args.partial_train:.0%}" if args.partial_train < 1.0 else ""))
 
     weights_dir = dataset_dir / "weights"
     weights_dir.mkdir(exist_ok=True)
+
+    run_date = datetime.now().strftime("%Y%m%d")
+    run_uid  = _uuid_mod.uuid4().hex[:8]
+    shared_run_dir = weights_dir / "runs" / f"run_{run_date}_{run_uid}"
+    shared_run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run dir : {shared_run_dir.relative_to(dataset_dir)}")
+    args.shared_run_dir = shared_run_dir
 
     if not args.wandb_project:
         reason = "wandb not installed" if not WANDB_OK else "no --wandb-project given"

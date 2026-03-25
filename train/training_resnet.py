@@ -36,9 +36,9 @@ MODEL_NAME = 'ResNetAutoencoder'
 
 class ResNetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=1024, epochs=50, learning_rate=1e-4,
+                 batch_size=1024, epochs=50, learning_rate=3e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
-                 wandb_project="", data_fraction=1.0):
+                 wandb_project="", data_fraction=1.0, output_dir=None):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.batch_size = batch_size
@@ -51,6 +51,7 @@ class ResNetAutoencoderTrainer:
         self.pad = nperseg // 2
         self.random_state = random_state
         self.data_fraction = data_fraction
+        self.output_dir = Path(output_dir) if output_dir is not None else None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.run_id = uuid.uuid4().hex[:8]
@@ -148,7 +149,7 @@ class ResNetAutoencoderTrainer:
 
     def _compute_val_snr(self) -> float:
         all_true, all_pred = [], []
-        for X_batch, y_batch in self.val_loader:
+        for X_batch, y_batch in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
             pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
             all_pred.append(pred)
             all_true.append(y_batch.squeeze(1).numpy())
@@ -160,7 +161,7 @@ class ResNetAutoencoderTrainer:
         self.model.eval()
         total = 0.0
         with torch.no_grad():
-            for X_batch, y_batch in self.val_loader:
+            for X_batch, y_batch in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
                 noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
                 clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
                 total += loss_fn(self.model(noisy_spec) * noisy_spec, clean_spec).item()
@@ -184,6 +185,8 @@ class ResNetAutoencoderTrainer:
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             total_loss = 0.0
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
             for X_batch, y_batch in pbar:
@@ -194,6 +197,9 @@ class ResNetAutoencoderTrainer:
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
+
+            vram_str = (f" | vram={torch.cuda.max_memory_allocated() / 1024**3:.2f}GB"
+                        if torch.cuda.is_available() else "")
 
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
@@ -212,7 +218,7 @@ class ResNetAutoencoderTrainer:
             print(f"Epoch {epoch:02d}/{self.epochs} | "
                   f"train={total_loss / len(self.train_loader):.5f} | "
                   f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB | "
-                  f"lr={lr_now:.2e}")
+                  f"lr={lr_now:.2e}{vram_str}")
 
             train_history.append(total_loss / len(self.train_loader))
             val_snr_history.append(val_snr)
@@ -228,7 +234,10 @@ class ResNetAutoencoderTrainer:
                     print(f"  Early stopping: no improvement for {early_stop_patience} epochs")
                     break
 
-        run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
+        if self.output_dir is not None:
+            run_dir = self.output_dir / f"{MODEL_NAME}_{self.noise_type}"
+        else:
+            run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
         save_path = run_dir / "model_best.pth"
         save_training_curves(
