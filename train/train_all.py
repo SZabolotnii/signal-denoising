@@ -42,11 +42,11 @@ ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
 # Values calibrated from actual vram= logs; target ≤ 6.5 GiB peak (fwd+bwd).
 # --batch-size overrides all of these when explicitly provided.
 MODEL_BATCH_SIZES = {
-    "transformer": 128,   # O(T²) attention at T=1024; measured 4.99 GB — keep, ~3 GB margin
-    "unet":        1024,  # measured 3.26 GB at B=512 → doubled, est. ~6 GB
-    "vae":         8192,  # measured 1.04 GB at B=2048 → 4×, est. ~4 GB
-    "resnet":      2048,  # measured 2.86 GB at B=1024 → doubled, est. ~5.5 GB
-    "hybrid":      4096,  # measured 1.30 GB at B=1024 → 4×, est. ~5 GB
+    "transformer": 128,   # O(T²) attention at T=1024; measured 4.99 GB
+    "unet":        1024,  # torch.stft on GPU; measured 6.47 GB — ~1 GB margin on 8 GB card
+    "vae":         8192,  # torch.stft on GPU; measured 3.91 GB
+    "resnet":      2048,  # torch.stft on GPU; measured 4.82 GB
+    "hybrid":      4096,  # torch.stft 4-ch on GPU; measured 5.16 GB
     "wavelet":     512,   # CPU-only
 }
 
@@ -240,7 +240,7 @@ def generate_report(results: list, dataset_dir: Path, args, weights_dir: Path):
         json.dump(report, f, indent=2, default=str)
 
     md_path = weights_dir / f"training_report_{timestamp}.md"
-    with open(md_path, "w") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write("# Training Report\n\n")
         f.write(f"**Dataset:** `{dataset_dir.name}`  \n")
         f.write(f"**Noise type:** {args.noise_type}  \n")

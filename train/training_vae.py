@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from scipy.signal import stft, istft
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 try:
@@ -78,13 +77,30 @@ class VAETrainer:
 
     # ── data ──────────────────────────────────────────────────────────────────
 
+    # ── STFT helpers (GPU-batched, no scipy) ──────────────────────────────────
+
+    def _stft_batch(self, x: torch.Tensor) -> torch.Tensor:
+        """[B, T] → complex [B, F, T'] — Hann window, center=True."""
+        win = torch.hann_window(self.nperseg, device=x.device)
+        return torch.stft(x, n_fft=self.nperseg,
+                          hop_length=self.nperseg - self.noverlap,
+                          win_length=self.nperseg, window=win,
+                          center=True, pad_mode='reflect',
+                          onesided=True, return_complex=True)
+
+    def _istft_batch(self, spec: torch.Tensor) -> torch.Tensor:
+        """complex [B, F, T'] → [B, signal_len]"""
+        win = torch.hann_window(self.nperseg, device=spec.device)
+        return torch.istft(spec, n_fft=self.nperseg,
+                           hop_length=self.nperseg - self.noverlap,
+                           win_length=self.nperseg, window=win,
+                           center=True, onesided=True, length=self.signal_len)
+
+    # ── data ──────────────────────────────────────────────────────────────────
+
     def _signal_to_mag_tensor(self, signal_batch: torch.Tensor) -> torch.Tensor:
-        padded = nn.functional.pad(signal_batch, (self.pad, self.pad), mode="reflect")
-        mags = []
-        for s in padded.squeeze(1).cpu().numpy():
-            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            mags.append(np.abs(Zxx))
-        return torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
+        spec = self._stft_batch(signal_batch.squeeze(1).to(self.device))
+        return spec.abs().unsqueeze(1)
 
     def load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
@@ -110,10 +126,14 @@ class VAETrainer:
         example = self._signal_to_mag_tensor(X[:1])
         _, _, freq_bins, time_frames = example.shape
 
+        pin = torch.cuda.is_available()
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True),
-            DataLoader(val_set,   batch_size=self.batch_size),
-            DataLoader(test_set,  batch_size=self.batch_size),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(val_set,   batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(test_set,  batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
             freq_bins, time_frames,
         )
 
@@ -127,25 +147,13 @@ class VAETrainer:
     def _denoise_batch(self, signal_batch: torch.Tensor) -> torch.Tensor:
         """[N, 1, T] → [N, 1, T]"""
         self.model.eval()
-        padded = nn.functional.pad(signal_batch, (self.pad, self.pad), mode='reflect')
-        mags, phases = [], []
-        for s in padded.squeeze(1).cpu().numpy():
-            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            mags.append(np.abs(Zxx))
-            phases.append(np.angle(Zxx))
-        spec_t = torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
+        x = signal_batch.squeeze(1).to(self.device)
+        spec = self._stft_batch(x)
+        mag = spec.abs().unsqueeze(1)
         with torch.no_grad():
-            out_mag, _, _ = self.model(spec_t)
-            out_mag = out_mag.squeeze(1).cpu().numpy()
-        rec_signals = []
-        for mag, phase in zip(out_mag, phases):
-            _, rec = istft(mag * np.exp(1j * phase), fs=self.fs,
-                           nperseg=self.nperseg, noverlap=self.noverlap)
-            rec = rec[self.pad: self.pad + self.signal_len]
-            if len(rec) < self.signal_len:
-                rec = np.pad(rec, (0, self.signal_len - len(rec)))
-            rec_signals.append(rec.astype(np.float32))
-        return torch.tensor(np.stack(rec_signals), dtype=torch.float32).unsqueeze(1)
+            out_mag, _, _ = self.model(mag)
+        out_spec = out_mag.squeeze(1) * torch.exp(1j * torch.angle(spec))
+        return self._istft_batch(out_spec).unsqueeze(1)
 
     # ── validation ────────────────────────────────────────────────────────────
 

@@ -90,10 +90,14 @@ class TransformerTrainer:
             dataset, [train_len, val_len, test_len],
             generator=torch.Generator().manual_seed(self.random_state),
         )
+        pin = torch.cuda.is_available()
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True),
-            DataLoader(val_set,   batch_size=self.batch_size),
-            DataLoader(test_set,  batch_size=self.batch_size),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(val_set,   batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(test_set,  batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
         )
 
     # ── inference ─────────────────────────────────────────────────────────────

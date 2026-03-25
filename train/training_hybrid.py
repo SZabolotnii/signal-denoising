@@ -17,7 +17,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from scipy.signal import stft, istft
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 try:
@@ -135,6 +134,25 @@ class HybridUnetTrainer:
         ).to(self.device)
         print(f"[Info] Model params: {self.model.param_count():,}")
 
+    # ── STFT helpers (GPU-batched, no scipy) ──────────────────────────────────
+
+    def _stft_batch(self, x: torch.Tensor) -> torch.Tensor:
+        """[B, T] → complex [B, F, T'] — Hann window, center=True."""
+        win = torch.hann_window(self.nperseg, device=x.device)
+        return torch.stft(x, n_fft=self.nperseg,
+                          hop_length=self.nperseg - self.noverlap,
+                          win_length=self.nperseg, window=win,
+                          center=True, pad_mode='reflect',
+                          onesided=True, return_complex=True)
+
+    def _istft_batch(self, spec: torch.Tensor) -> torch.Tensor:
+        """complex [B, F, T'] → [B, signal_len]"""
+        win = torch.hann_window(self.nperseg, device=spec.device)
+        return torch.istft(spec, n_fft=self.nperseg,
+                           hop_length=self.nperseg - self.noverlap,
+                           win_length=self.nperseg, window=win,
+                           center=True, onesided=True, length=self.signal_len)
+
     # ── data ──────────────────────────────────────────────────────────────────
 
     def _load_data(self):
@@ -146,8 +164,9 @@ class HybridUnetTrainer:
         assert noisy.shape[1] == self.signal_len, \
             f"Signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
 
-        _, _, Zxx = stft(clean[0], fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-        input_shape = np.abs(Zxx).shape
+        dummy = torch.zeros(1, self.signal_len)
+        spec0 = self._stft_batch(dummy)
+        input_shape = (int(spec0.shape[1]), int(spec0.shape[2]))
 
         dataset = TensorDataset(
             torch.tensor(noisy, dtype=torch.float32),
@@ -163,10 +182,14 @@ class HybridUnetTrainer:
         train_clean = clean[train_set.indices]
         train_noisy = noisy[train_set.indices]
 
+        pin = torch.cuda.is_available()
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True),
-            DataLoader(val_set,   batch_size=self.batch_size),
-            DataLoader(test_set,  batch_size=self.batch_size),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(val_set,   batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(test_set,  batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
             input_shape,
             train_clean,
             train_noisy,
@@ -177,24 +200,20 @@ class HybridUnetTrainer:
     def _batch_to_4ch(self, signal_batch: np.ndarray) -> torch.Tensor:
         """[N, T] → (B, 1+S, F, T') with per-signal DSGE normalisation.
 
-        Each signal's DSGE channels are scaled to match that signal's own
-        STFT magnitude, independently of batch composition.  Using a batch-level
-        reference caused a training/inference mismatch: during training batches
-        contain mixed-SNR signals so the reference is always large, but during
-        per-SNR evaluation all signals share the same SNR level, giving a
-        completely different reference → model received out-of-distribution
-        inputs → flat SNR curve despite good val metrics.
+        STFT is computed in one GPU-batched call; DSGE spectrograms are still
+        computed per-signal (CPU) since DSGEFeatureExtractor is not vectorised.
         """
+        x_t = torch.tensor(signal_batch, dtype=torch.float32, device=self.device)
+        stft_mags = self._stft_batch(x_t).abs().cpu().numpy()  # [B, F, T']
+
         all_channels = []
-        for s in signal_batch:
-            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            stft_mag = np.abs(Zxx)                              # [F, T']
-            stft_ref = stft_mag.max() + 1e-8                    # per-signal scale
+        for i, s in enumerate(signal_batch):
+            stft_mag = stft_mags[i]                             # [F, T']
+            stft_ref = stft_mag.max() + 1e-8
 
             dsge_specs = self.dsge.compute_dsge_spectrograms(s) # [S, F, T']
-            # Normalise each DSGE channel to this signal's STFT scale
-            ch_max = dsge_specs.max(axis=(1, 2), keepdims=True) + 1e-8  # [S, 1, 1]
-            dsge_norm = dsge_specs * (stft_ref / ch_max)        # [S, F, T']
+            ch_max = dsge_specs.max(axis=(1, 2), keepdims=True) + 1e-8
+            dsge_norm = dsge_specs * (stft_ref / ch_max)
 
             all_channels.append(
                 np.concatenate([stft_mag[np.newaxis], dsge_norm], axis=0)  # [1+S, F, T']
@@ -205,11 +224,8 @@ class HybridUnetTrainer:
         ).to(self.device)  # [B, 1+S, F, T']
 
     def _signal_to_clean_mag(self, signal_batch: np.ndarray) -> torch.Tensor:
-        mags = []
-        for s in signal_batch:
-            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            mags.append(np.abs(Zxx))
-        return torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
+        x_t = torch.tensor(signal_batch, dtype=torch.float32, device=self.device)
+        return self._stft_batch(x_t).abs().unsqueeze(1)
 
     # ── inference ─────────────────────────────────────────────────────────────
 
@@ -218,24 +234,14 @@ class HybridUnetTrainer:
         return self._denoise_batch(noisy)
 
     def _denoise_batch(self, signal_batch: np.ndarray) -> np.ndarray:
-        phases = [
-            np.angle(stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)[2])
-            for s in signal_batch
-        ]
-        x4 = self._batch_to_4ch(signal_batch)
-        noisy_mag = x4[:, 0, :, :].cpu().numpy()
+        x_t = torch.tensor(signal_batch, dtype=torch.float32, device=self.device)
+        spec = self._stft_batch(x_t)                          # [B, F, T'] complex
+        x4 = self._batch_to_4ch(signal_batch)                 # [B, 1+S, F, T']
         self.model.eval()
         with torch.no_grad():
-            out_mag = self.model(x4).squeeze(1).cpu().numpy() * noisy_mag
-
-        rec = []
-        for mag, phase in zip(out_mag, phases):
-            _, r = istft(mag * np.exp(1j * phase), fs=self.fs,
-                         nperseg=self.nperseg, noverlap=self.noverlap)
-            r = r[:self.signal_len] if len(r) >= self.signal_len \
-                else np.pad(r, (0, self.signal_len - len(r)))
-            rec.append(r.astype(np.float32))
-        return np.stack(rec)
+            out_mag = self.model(x4).squeeze(1) * x4[:, 0, :, :]  # [B, F, T']
+        out_spec = out_mag * torch.exp(1j * torch.angle(spec))
+        return self._istft_batch(out_spec).cpu().numpy()
 
     # ── validation ────────────────────────────────────────────────────────────
 

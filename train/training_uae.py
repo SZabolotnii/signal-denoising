@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from scipy.signal import stft, istft
 
 try:
     import wandb
@@ -32,23 +31,6 @@ from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, S
 from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
 
 MODEL_NAME = 'UnetAutoencoder'
-WINDOW = 'hann'
-
-
-def stft_mag_phase(x, fs, nperseg, noverlap, pad):
-    x_pad = np.pad(x, pad, mode="reflect")
-    _, _, Zxx = stft(x_pad, fs=fs, nperseg=nperseg, noverlap=noverlap,
-                     window=WINDOW, boundary=None, padded=False)
-    return np.abs(Zxx).astype(np.float32), np.angle(Zxx).astype(np.float32)
-
-
-def istft_from_mag_phase(mag, phase, fs, nperseg, noverlap, pad, target_len):
-    _, rec = istft(mag * np.exp(1j * phase), fs=fs, nperseg=nperseg, noverlap=noverlap,
-                   window=WINDOW, input_onesided=True, boundary=None)
-    rec = rec[pad: pad + target_len]
-    if len(rec) < target_len:
-        rec = np.pad(rec, (0, target_len - len(rec)))
-    return rec.astype(np.float32)
 
 
 def _stft_mag_torch(x: torch.Tensor, nperseg: int, noverlap: int) -> torch.Tensor:
@@ -111,6 +93,25 @@ class UnetAutoencoderTrainer:
         self.train_loader, self.val_loader, self.test_loader, self.input_shape = self._load_data()
         self.model = UnetAutoencoder(self.input_shape).to(self.device)
 
+    # ── STFT helpers (GPU-batched, no scipy) ──────────────────────────────────
+
+    def _stft_batch(self, x: torch.Tensor) -> torch.Tensor:
+        """[B, T] → complex [B, F, T'] — Hann window, center=True."""
+        win = torch.hann_window(self.nperseg, device=x.device)
+        return torch.stft(x, n_fft=self.nperseg,
+                          hop_length=self.nperseg - self.noverlap,
+                          win_length=self.nperseg, window=win,
+                          center=True, pad_mode='reflect',
+                          onesided=True, return_complex=True)
+
+    def _istft_batch(self, spec: torch.Tensor) -> torch.Tensor:
+        """complex [B, F, T'] → [B, signal_len]"""
+        win = torch.hann_window(self.nperseg, device=spec.device)
+        return torch.istft(spec, n_fft=self.nperseg,
+                           hop_length=self.nperseg - self.noverlap,
+                           win_length=self.nperseg, window=win,
+                           center=True, onesided=True, length=self.signal_len)
+
     # ── data ──────────────────────────────────────────────────────────────────
 
     def _load_data(self):
@@ -122,8 +123,9 @@ class UnetAutoencoderTrainer:
         assert noisy.shape[1] == self.signal_len, \
             f"Signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
 
-        mag0, _ = stft_mag_phase(clean[0], self.fs, self.nperseg, self.noverlap, self.pad)
-        input_shape = mag0.shape
+        dummy = torch.zeros(1, self.signal_len)
+        spec0 = self._stft_batch(dummy)
+        input_shape = (int(spec0.shape[1]), int(spec0.shape[2]))
 
         dataset = TensorDataset(
             torch.tensor(noisy, dtype=torch.float32),
@@ -137,10 +139,14 @@ class UnetAutoencoderTrainer:
             dataset, [train_len, val_len, test_len],
             generator=torch.Generator().manual_seed(self.random_state),
         )
+        pin = torch.cuda.is_available()
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True),
-            DataLoader(val_set,   batch_size=self.batch_size),
-            DataLoader(test_set,  batch_size=self.batch_size),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(val_set,   batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(test_set,  batch_size=self.batch_size,
+                       num_workers=4, pin_memory=pin, persistent_workers=True),
             input_shape,
         )
 
@@ -149,20 +155,13 @@ class UnetAutoencoderTrainer:
     def denoise_numpy(self, noisy: np.ndarray) -> np.ndarray:
         """[N, T] → [N, T], batched STFT → mask → ISTFT."""
         self.model.eval()
-        mags, phases = [], []
-        for x in noisy:
-            m, p = stft_mag_phase(x, self.fs, self.nperseg, self.noverlap, self.pad)
-            mags.append(m)
-            phases.append(p)
-        mags_np = np.stack(mags)
-        mags_t = torch.tensor(mags_np, dtype=torch.float32, device=self.device).unsqueeze(1)
+        x = torch.tensor(noisy, dtype=torch.float32, device=self.device)
+        spec = self._stft_batch(x)
+        mag = spec.abs().unsqueeze(1)
         with torch.no_grad():
-            masks = self.model(mags_t).squeeze(1).cpu().numpy()
-        out_mags = masks * mags_np
-        return np.stack([
-            istft_from_mag_phase(m, p, self.fs, self.nperseg, self.noverlap, self.pad, self.signal_len)
-            for m, p in zip(out_mags, phases)
-        ])
+            out_mag = self.model(mag) * mag
+        out_spec = out_mag.squeeze(1) * torch.exp(1j * torch.angle(spec))
+        return self._istft_batch(out_spec).cpu().numpy()
 
     # ── validation ────────────────────────────────────────────────────────────
 
@@ -180,18 +179,9 @@ class UnetAutoencoderTrainer:
         total = 0.0
         with torch.no_grad():
             for noisy, clean in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
-                noisy_np = noisy.numpy()
-                clean_np = clean.numpy()
-                mags, clean_mags = [], []
-                for xn, xc in zip(noisy_np, clean_np):
-                    nm, _ = stft_mag_phase(xn, self.fs, self.nperseg, self.noverlap, self.pad)
-                    cm, _ = stft_mag_phase(xc, self.fs, self.nperseg, self.noverlap, self.pad)
-                    mags.append(nm); clean_mags.append(cm)
-                nm_t = torch.tensor(np.stack(mags),       dtype=torch.float32, device=self.device).unsqueeze(1)
-                cm_t = torch.tensor(np.stack(clean_mags), dtype=torch.float32, device=self.device).unsqueeze(1)
-                mask    = self.model(nm_t)
-                out_mag = mask * nm_t
-                total += loss_fn(out_mag, cm_t).item()
+                nm_t = self._stft_batch(noisy.to(self.device)).abs().unsqueeze(1)
+                cm_t = self._stft_batch(clean.to(self.device)).abs().unsqueeze(1)
+                total += loss_fn(self.model(nm_t) * nm_t, cm_t).item()
         return total / len(self.val_loader)
 
     # ── training loop ─────────────────────────────────────────────────────────
@@ -217,20 +207,9 @@ class UnetAutoencoderTrainer:
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
             for noisy, clean in pbar:
-                noisy_np = noisy.numpy()
-                clean_np = clean.numpy()
-                mags, clean_mags = [], []
-                for xn, xc in zip(noisy_np, clean_np):
-                    nm, _ = stft_mag_phase(xn, self.fs, self.nperseg, self.noverlap, self.pad)
-                    cm, _ = stft_mag_phase(xc, self.fs, self.nperseg, self.noverlap, self.pad)
-                    mags.append(nm); clean_mags.append(cm)
-
-                nm_t = torch.tensor(np.stack(mags),       dtype=torch.float32, device=self.device).unsqueeze(1)
-                cm_t = torch.tensor(np.stack(clean_mags), dtype=torch.float32, device=self.device).unsqueeze(1)
-
-                mask    = self.model(nm_t)
-                out_mag = mask * nm_t
-                loss = loss_fn(out_mag, cm_t)
+                nm_t = self._stft_batch(noisy.to(self.device)).abs().unsqueeze(1)
+                cm_t = self._stft_batch(clean.to(self.device)).abs().unsqueeze(1)
+                loss = loss_fn(self.model(nm_t) * nm_t, cm_t)
 
                 optimizer.zero_grad()
                 loss.backward()
