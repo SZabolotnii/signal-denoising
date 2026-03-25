@@ -38,22 +38,15 @@ except Exception:
 # before GPU memory gets fragmented by smaller models.
 ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
 
-# Per-model batch sizes tuned for ~7.6 GiB VRAM with signal_len=1024, nperseg=128.
-# STFT output shape: [B, 1, 65, 33]. Activation budgets (fwd+bwd ≈ 3× fwd):
-#   Transformer: O(T²) attention; T=1024 → B=128 uses ~6.8 GiB → already max safe.
-#   UNet:        4-level encoder (32→64→128→256 ch) + skip connections;
-#                B=2048 → e1 alone ≈ 560 MiB, total ≈ 4 GiB → OOM.  B=512 → ~1 GiB.
-#   ResNet:      3-level (16→32→64 ch); B=4096 → layer1 ≈ 560 MiB, total ≈ 3 GiB → OOM.
-#                B=1024 → ~750 MiB, safe.
-#   VAE:         Same topology as UNet + reparameterisation; B=2048 fits (measured OK).
-#   Hybrid:      4-channel spectral + DSGE preprocessing; B=1024 fits (measured OK).
+# Per-model batch sizes measured on ~8 GiB GPU with signal_len=1024, nperseg=128.
+# Values calibrated from actual vram= logs; target ≤ 6.5 GiB peak (fwd+bwd).
 # --batch-size overrides all of these when explicitly provided.
 MODEL_BATCH_SIZES = {
-    "transformer": 128,   # O(T²) attention at T=1024; B=128 ≈ 6.8 GiB measured
-    "unet":        512,   # 4-level UNet skip activations; B=2048 OOMed → reduced 4×
-    "vae":         2048,  # UNet-like + KL; B=2048 measured OK
-    "resnet":      1024,  # 3-level ResNet; B=4096 OOMed → reduced 4×
-    "hybrid":      1024,  # 4-channel DSGE+UNet; B=1024 measured OK
+    "transformer": 128,   # O(T²) attention at T=1024; measured 4.99 GB — keep, ~3 GB margin
+    "unet":        1024,  # measured 3.26 GB at B=512 → doubled, est. ~6 GB
+    "vae":         8192,  # measured 1.04 GB at B=2048 → 4×, est. ~4 GB
+    "resnet":      2048,  # measured 2.86 GB at B=1024 → doubled, est. ~5.5 GB
+    "hybrid":      4096,  # measured 1.30 GB at B=1024 → 4×, est. ~5 GB
     "wavelet":     512,   # CPU-only
 }
 
