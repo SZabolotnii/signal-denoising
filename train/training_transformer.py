@@ -14,7 +14,6 @@ load_dotenv(ROOT / ".env")
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
@@ -218,7 +217,7 @@ class TransformerTrainer:
         per_snr = {}
         test_dir = self.dataset_path / "test"
         if test_dir.exists():
-            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type)
+            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type, batch_size=self.batch_size)
             print_snr_table(per_snr, MODEL_NAME)
             plot_snr_curve(
                 per_snr, MODEL_NAME,

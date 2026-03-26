@@ -378,7 +378,7 @@ class HybridUnetTrainer:
         per_snr = {}
         test_dir = self.dataset_path / "test"
         if test_dir.exists():
-            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type)
+            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type, batch_size=self.batch_size)
             print_snr_table(per_snr, self.model_name)
             plot_snr_curve(
                 per_snr, self.model_name,

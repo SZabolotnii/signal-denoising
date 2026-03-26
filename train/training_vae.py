@@ -14,7 +14,6 @@ load_dotenv(ROOT / ".env")
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
@@ -39,7 +38,8 @@ class VAETrainer:
                  batch_size=2048, epochs=50, learning_rate=3e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
                  wandb_project="", data_fraction=1.0, output_dir=None,
-                 kl_beta: float = 1e-3, kl_warmup_epochs: int = 5):
+                 kl_beta: float = 1e-3, kl_warmup_epochs: int = 5,
+                 ):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.batch_size = batch_size
@@ -330,7 +330,7 @@ class VAETrainer:
         per_snr = {}
         test_dir = self.dataset_path / "test"
         if test_dir.exists():
-            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type)
+            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type, batch_size=self.batch_size)
             print_snr_table(per_snr, MODEL_NAME)
             plot_snr_curve(
                 per_snr, MODEL_NAME,
