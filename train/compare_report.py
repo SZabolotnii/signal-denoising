@@ -156,6 +156,18 @@ def _load_vae(run_dir: Path, cfg: dict, nperseg: int = 128):
     model = SpectrogramVAE(freq_bins=freq_bins, time_frames=time_frames).to(device)
     model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
+
+    # New VAE pipeline reconstructs normalized log-magnitude spectrogram.
+    # If available, load normalization stats to reproduce preprocessing.
+    norm_path = run_dir / 'spec_norm.json'
+    norm = None
+    if norm_path.exists():
+        try:
+            with open(norm_path) as f:
+                norm = json.load(f)
+        except Exception:
+            norm = None
+
     def denoise(noisy):
         t = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)
         padded = nn.functional.pad(t, (pad, pad), mode='reflect')
@@ -163,10 +175,27 @@ def _load_vae(run_dir: Path, cfg: dict, nperseg: int = 128):
         for s in padded.squeeze(1).numpy():
             _, _, Zxx = _stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)
             mags.append(np.abs(Zxx)); phases.append(np.angle(Zxx))
-        spec = torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(device)
+
+        mags_np = np.stack(mags)
+        spec = torch.tensor(mags_np, dtype=torch.float32).unsqueeze(1).to(device)
+
         with torch.no_grad():
-            out_mag, _, _ = model(spec)
+            if norm and norm.get('domain') == 'log1p_mag_zscore':
+                mean = float(norm.get('mean', 0.0))
+                std = float(norm.get('std', 1.0))
+                x = (torch.log1p(spec) - mean) / (std + 1e-8)
+                recon_z, _, _ = model(x)
+                logmag = recon_z * (std + 1e-8) + mean
+                out_mag = torch.expm1(logmag).clamp_min(0.0)
+            else:
+                # Legacy weights (older runs): model was trained to output a [0,1] mask-like magnitude
+                # because decoder ended with Sigmoid(). New model removes Sigmoid() to avoid stalling,
+                # so apply sigmoid here to reproduce legacy behaviour.
+                out_mag, _, _ = model(spec)
+                out_mag = torch.sigmoid(out_mag)
+
             out_mag = out_mag.squeeze(1).cpu().numpy()
+
         rec = []
         for mag, phase in zip(out_mag, phases):
             _, r = _istft(mag * np.exp(1j * phase), fs=fs, nperseg=nperseg, noverlap=noverlap)
@@ -208,6 +237,11 @@ def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int, npe
         str(run_dir / 'dsge_state.npz'), basis_type=dsge_basis,
         stft_params={'nperseg': nperseg, 'noverlap': noverlap, 'fs': fs},
     )
+
+    def _p99(x, eps: float = 1e-8):
+        v = float(np.percentile(x, 99))
+        return v if v > eps else eps
+
     def denoise(noisy):
         phases = [np.angle(_stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)[2]) for s in noisy]
         stft_mags, dsge_list = [], [[] for _ in range(dsge_order)]
@@ -217,11 +251,14 @@ def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int, npe
             for i, spec in enumerate(dsge.compute_dsge_spectrograms(s)):
                 dsge_list[i].append(spec)
         stft_stack = np.stack(stft_mags)
-        ref_max = stft_stack.max() + 1e-8
-        channels = [stft_stack] + [
-            np.stack(dsge_list[i]) * (ref_max / (np.stack(dsge_list[i]).max() + 1e-8))
-            for i in range(dsge_order)
-        ]
+        # Keep preprocessing consistent with training_hybrid.py:
+        # use robust p99 scale instead of max (max is unstable under impulsive noise).
+        ref_scale = _p99(stft_stack)
+        channels = [stft_stack]
+        for i in range(dsge_order):
+            ch = np.stack(dsge_list[i])
+            ch_scale = _p99(ch)
+            channels.append(ch * (ref_scale / ch_scale))
         x4 = torch.tensor(np.stack(channels, axis=1), dtype=torch.float32).to(device)
         with torch.no_grad():
             out_mag = model(x4).squeeze(1).cpu().numpy() * x4[:, 0].cpu().numpy()

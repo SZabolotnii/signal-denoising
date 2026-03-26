@@ -28,9 +28,43 @@ from tqdm import tqdm
 
 from models.autoencoder_unet import UnetAutoencoder
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+from train.losses import select_loss
 from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
 
 MODEL_NAME = 'UnetAutoencoder'
+
+
+# ── Compatibility helpers for compare_report.py ─────────────────────────────
+# compare_report.py historically imported these from train.training_uae.
+# Keep them here to avoid breaking reporting scripts.
+def stft_mag_phase(x: np.ndarray, fs: int, nperseg: int, noverlap: int, pad: int = 0):
+    """Return (magnitude, phase) for a single 1D signal using scipy STFT."""
+    from scipy.signal import stft as _stft
+
+    if pad > 0:
+        x = np.pad(x, (pad, pad), mode="reflect")
+    _, _, Zxx = _stft(x, fs=fs, nperseg=nperseg, noverlap=noverlap, boundary=None)
+    return np.abs(Zxx).astype(np.float32), np.angle(Zxx).astype(np.float32)
+
+
+def istft_from_mag_phase(
+    mag: np.ndarray,
+    phase: np.ndarray,
+    fs: int,
+    nperseg: int,
+    noverlap: int,
+    pad: int,
+    signal_len: int,
+):
+    """Inverse STFT for one sample; crops reflect padding and ensures signal_len."""
+    from scipy.signal import istft as _istft
+
+    Z = mag * np.exp(1j * phase)
+    _, x_rec = _istft(Z, fs=fs, nperseg=nperseg, noverlap=noverlap, input_onesided=True, boundary=None)
+    if pad > 0 and len(x_rec) >= 2 * pad:
+        x_rec = x_rec[pad: -pad]
+    x_rec = x_rec[:signal_len] if len(x_rec) >= signal_len else np.pad(x_rec, (0, signal_len - len(x_rec)))
+    return x_rec.astype(np.float32)
 
 
 def _stft_mag_torch(x: torch.Tensor, nperseg: int, noverlap: int) -> torch.Tensor:
@@ -188,7 +222,7 @@ class UnetAutoencoderTrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.MSELoss()
+        loss_fn = select_loss(self.noise_type)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', patience=3, factor=0.5, threshold=0.01
         )

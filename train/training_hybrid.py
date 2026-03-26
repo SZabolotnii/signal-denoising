@@ -30,7 +30,14 @@ from tqdm import tqdm
 from models.hybrid_unet import HybridDSGE_UNet
 from models.dsge_layer import DSGEFeatureExtractor
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+from train.losses import select_loss
 from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
+
+
+def _p99(x: np.ndarray, eps: float = 1e-8) -> float:
+    """Robust scale estimate (99th percentile)."""
+    v = float(np.percentile(x, 99))
+    return v if v > eps else eps
 
 
 def _model_name(dsge_basis: str, dsge_order: int) -> str:
@@ -209,11 +216,12 @@ class HybridUnetTrainer:
         all_channels = []
         for i, s in enumerate(signal_batch):
             stft_mag = stft_mags[i]                             # [F, T']
-            stft_ref = stft_mag.max() + 1e-8
+            stft_ref = _p99(stft_mag)
 
-            dsge_specs = self.dsge.compute_dsge_spectrograms(s) # [S, F, T']
-            ch_max = dsge_specs.max(axis=(1, 2), keepdims=True) + 1e-8
-            dsge_norm = dsge_specs * (stft_ref / ch_max)
+            dsge_specs = self.dsge.compute_dsge_spectrograms(s)  # [S, F, T']
+            ch_scales = np.array([_p99(dsge_specs[j]) for j in range(dsge_specs.shape[0])], dtype=np.float32)
+            ch_scales = ch_scales[:, None, None]
+            dsge_norm = dsge_specs * (stft_ref / ch_scales)
 
             all_channels.append(
                 np.concatenate([stft_mag[np.newaxis], dsge_norm], axis=0)  # [1+S, F, T']
@@ -278,7 +286,7 @@ class HybridUnetTrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.MSELoss()
+        loss_fn = select_loss(self.noise_type)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', patience=3, factor=0.5, threshold=0.01
         )

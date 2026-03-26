@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 from models.autoencoder_vae import SpectrogramVAE
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+from train.losses import select_recon_loss
 from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
 
 MODEL_NAME = 'SpectrogramVAE'
@@ -37,7 +38,8 @@ class VAETrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
                  batch_size=2048, epochs=50, learning_rate=3e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
-                 wandb_project="", data_fraction=1.0, output_dir=None):
+                 wandb_project="", data_fraction=1.0, output_dir=None,
+                 kl_beta: float = 1e-3, kl_warmup_epochs: int = 5):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.batch_size = batch_size
@@ -52,6 +54,10 @@ class VAETrainer:
         self.data_fraction = data_fraction
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # VAE-specific loss weighting
+        self.kl_beta = float(kl_beta)
+        self.kl_warmup_epochs = int(kl_warmup_epochs)
 
         self.run_id = uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
@@ -70,7 +76,9 @@ class VAETrainer:
             print(f"[W&B] Logging disabled ({reason})")
 
         self.train_loader, self.val_loader, self.test_loader, \
-            self.freq_bins, self.time_frames = self.load_data()
+            self.freq_bins, self.time_frames, self._norm_stats = self.load_data()
+        self.spec_mean = float(self._norm_stats["mean"])
+        self.spec_std = float(self._norm_stats["std"])
         self.model = SpectrogramVAE(
             freq_bins=self.freq_bins, time_frames=self.time_frames
         ).to(self.device)
@@ -98,9 +106,22 @@ class VAETrainer:
 
     # ── data ──────────────────────────────────────────────────────────────────
 
-    def _signal_to_mag_tensor(self, signal_batch: torch.Tensor) -> torch.Tensor:
+    def _signal_to_logmag_z(self, signal_batch: torch.Tensor) -> torch.Tensor:
+        """[B,1,T] -> [B,1,F,T'] normalized log-magnitude spectrogram."""
         spec = self._stft_batch(signal_batch.squeeze(1).to(self.device))
-        return spec.abs().unsqueeze(1)
+        mag = spec.abs()
+        logmag = torch.log1p(mag)
+        return ((logmag - self.spec_mean) / (self.spec_std + 1e-8)).unsqueeze(1)
+
+    def _signal_to_logmag(self, signal_batch: torch.Tensor) -> torch.Tensor:
+        """[B,1,T] -> [B,1,F,T'] log-magnitude spectrogram (no normalization)."""
+        spec = self._stft_batch(signal_batch.squeeze(1).to(self.device))
+        return torch.log1p(spec.abs()).unsqueeze(1)
+
+    def _denorm_to_mag(self, recon_z: torch.Tensor) -> torch.Tensor:
+        """[B,1,F,T'] normalized logmag -> linear magnitude."""
+        logmag = recon_z * (self.spec_std + 1e-8) + self.spec_mean
+        return torch.expm1(logmag).clamp_min(0.0)
 
     def load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
@@ -123,8 +144,26 @@ class VAETrainer:
             generator=torch.Generator().manual_seed(self.random_state),
         )
 
-        example = self._signal_to_mag_tensor(X[:1])
+        # Determine spectrogram shape
+        example = self._signal_to_logmag(X[:1])
         _, _, freq_bins, time_frames = example.shape
+
+        # Estimate normalization stats from a small subset of TRAIN signals
+        # (fast, stable; avoids running STFT over the whole dataset).
+        train_idx = train_set.indices
+        n_stats = min(2048, len(train_idx))
+        # take deterministic prefix (train_idx is deterministic due to seed)
+        subset = X[train_idx[:n_stats]].to(self.device)
+        with torch.no_grad():
+            subset_log = self._signal_to_logmag(subset).squeeze(1)  # [B,F,T']
+            mean = float(subset_log.mean().item())
+            std = float(subset_log.std().item() + 1e-8)
+        norm_stats = {
+            "domain": "log1p_mag_zscore",
+            "mean": mean,
+            "std": std,
+            "n_examples": int(n_stats),
+        }
 
         pin = torch.cuda.is_available()
         return (
@@ -135,6 +174,7 @@ class VAETrainer:
             DataLoader(test_set,  batch_size=self.batch_size,
                        num_workers=4, pin_memory=pin, persistent_workers=True),
             freq_bins, time_frames,
+            norm_stats,
         )
 
     # ── inference ─────────────────────────────────────────────────────────────
@@ -149,10 +189,12 @@ class VAETrainer:
         self.model.eval()
         x = signal_batch.squeeze(1).to(self.device)
         spec = self._stft_batch(x)
-        mag = spec.abs().unsqueeze(1)
+        logmag_z = ((torch.log1p(spec.abs()) - self.spec_mean) / (self.spec_std + 1e-8)).unsqueeze(1)
         with torch.no_grad():
-            out_mag, _, _ = self.model(mag)
-        out_spec = out_mag.squeeze(1) * torch.exp(1j * torch.angle(spec))
+            recon_z, _, _ = self.model(logmag_z)
+
+        out_mag = self._denorm_to_mag(recon_z).squeeze(1)
+        out_spec = out_mag * torch.exp(1j * torch.angle(spec))
         return self._istft_batch(out_spec).unsqueeze(1)
 
     # ── validation ────────────────────────────────────────────────────────────
@@ -172,11 +214,14 @@ class VAETrainer:
         total = 0.0
         with torch.no_grad():
             for X_batch, y_batch in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
-                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
-                recon, mu, logvar = self.model(noisy_spec)
-                kl   = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                loss = (loss_fn(recon, clean_spec) + kl) / noisy_spec.size(0)
+                noisy_z = self._signal_to_logmag_z(X_batch.to(self.device))
+                clean_z = self._signal_to_logmag_z(y_batch.to(self.device))
+                recon_z, mu, logvar = self.model(noisy_z)
+
+                # KL per-sample (mean over batch)
+                kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
+                # Use full beta at validation time
+                loss = loss_fn(recon_z, clean_z) + self.kl_beta * kl
                 total += loss.item()
         return total / len(self.val_loader)
 
@@ -184,7 +229,7 @@ class VAETrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.MSELoss(reduction="sum")
+        recon_loss = select_recon_loss(self.noise_type, reduction="mean")
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', patience=3, factor=0.5, threshold=0.01
         )
@@ -203,11 +248,19 @@ class VAETrainer:
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
             for X_batch, y_batch in pbar:
-                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
-                recon, mu, logvar = self.model(noisy_spec)
-                kl   = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                loss = (loss_fn(recon, clean_spec) + kl) / noisy_spec.size(0)
+                noisy_z = self._signal_to_logmag_z(X_batch.to(self.device))
+                clean_z = self._signal_to_logmag_z(y_batch.to(self.device))
+                recon_z, mu, logvar = self.model(noisy_z)
+
+                kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
+
+                # Linear warmup for KL weight to reduce posterior collapse.
+                if self.kl_warmup_epochs > 0:
+                    beta = self.kl_beta * min(1.0, epoch / self.kl_warmup_epochs)
+                else:
+                    beta = self.kl_beta
+
+                loss = recon_loss(recon_z, clean_z) + beta * kl
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
@@ -215,7 +268,7 @@ class VAETrainer:
             vram_str = (f" | vram={torch.cuda.max_memory_allocated() / 1024**3:.2f}GB"
                         if torch.cuda.is_available() else "")
 
-            val_loss = self._compute_val_loss(loss_fn)
+            val_loss = self._compute_val_loss(recon_loss)
             val_snr  = self._compute_val_snr()
 
             scheduler.step(val_loss)
@@ -223,8 +276,8 @@ class VAETrainer:
 
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
                 wandb.log({
-                    "train/mse_kl_loss": total_loss / len(self.train_loader),
-                    "val/mse_kl_loss":   val_loss,
+                    "train/recon_kl_loss": total_loss / len(self.train_loader),
+                    "val/recon_kl_loss":   val_loss,
                     "val/snr_db":        val_snr,
                     "train/lr":          lr_now,
                 }, step=epoch)
@@ -253,6 +306,15 @@ class VAETrainer:
         else:
             run_dir = self.dataset_path / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save spectrogram normalization so inference / compare_report can reproduce preprocessing.
+        norm_path = run_dir / "spec_norm.json"
+        with open(norm_path, "w", encoding="utf-8") as f:
+            json.dump({
+                **self._norm_stats,
+                "mean": self.spec_mean,
+                "std": self.spec_std,
+            }, f, indent=2)
         save_path = run_dir / "model_best.pth"
         save_training_curves(
             train_history, val_snr_history,

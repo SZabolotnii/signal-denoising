@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 from models.autoencoder_resnet import ResNetAutoencoder
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+from train.losses import select_loss
 from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, log_snr_curve_wandb, save_training_curves
 
 MODEL_NAME = 'ResNetAutoencoder'
@@ -178,7 +179,7 @@ class ResNetAutoencoderTrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.MSELoss()
+        loss_fn = select_loss(self.noise_type)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', patience=3, factor=0.5, threshold=0.01
         )

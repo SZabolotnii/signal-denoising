@@ -31,7 +31,12 @@ class SpectrogramVAE(nn.Module):
         self.decoder_deconv = nn.Sequential(
             nn.ConvTranspose2d(128, 64, 3, 2, 1, output_padding=1), nn.ReLU(),
             nn.ConvTranspose2d(64, 32, 3, 2, 1, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose2d(32, 1, 3, 2, 1, output_padding=1), nn.Sigmoid()
+            # IMPORTANT:
+            # Output is used to reconstruct spectrogram magnitudes.
+            # Magnitudes (or log-magnitudes) are not naturally bounded to [0, 1],
+            # therefore sigmoid here can cause training to stall due to saturation.
+            # We keep the output linear; the training pipeline defines the target scale.
+            nn.ConvTranspose2d(32, 1, 3, 2, 1, output_padding=1)
         )
 
     def reparameterize(self, mu, logvar):
