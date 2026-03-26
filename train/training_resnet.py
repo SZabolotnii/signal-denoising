@@ -244,7 +244,7 @@ class ResNetAutoencoderTrainer:
         if self.output_dir is not None:
             run_dir = self.output_dir / f"{MODEL_NAME}_{self.noise_type}"
         else:
-            run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
+            run_dir = self.dataset_path / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
         save_path = run_dir / "model_best.pth"
         save_training_curves(

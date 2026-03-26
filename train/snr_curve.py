@@ -17,6 +17,8 @@ import re
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -77,7 +79,8 @@ def evaluate_per_snr(
     )
 
     results = {}
-    for noisy_path in noisy_files:
+    for noisy_path in tqdm(noisy_files, desc=f"  {noise_type[:2].upper()} SNR levels",
+                           leave=False, unit="lvl"):
         parts = noisy_path.stem.split('_')
         snr_label = parts[1]
         clean_path = noisy_path.parent / f"test_{snr_label}_clean.npy"

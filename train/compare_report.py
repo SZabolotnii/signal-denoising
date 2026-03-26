@@ -2,10 +2,10 @@
 """
 Cross-evaluation comparison report.
 
-Scans <dataset>/weights/runs/ for all trained models, evaluates each on
-both Gaussian and Non-Gaussian test sets, then produces:
+Evaluates all models in a specific training run, tests each on both
+Gaussian and Non-Gaussian test sets, then produces:
 
-  weights/
+  runs/run_<date>_<uid>/
   ├── comparison_data_<ts>.csv          – flat table, one row per (model, train, test, SNR_in)
   ├── comparison_report_<ts>.md         – EN report with figures and text
   ├── comparison_report_<ts>_uk.md      – UA report
@@ -17,7 +17,7 @@ both Gaussian and Non-Gaussian test sets, then produces:
       └── fig5_example_denoising.png    – visual example
 
 Usage:
-    python train/compare_report.py --dataset data_generation/datasets/<name>
+    python train/compare_report.py --run data_generation/datasets/<name>/runs/run_<date>_<uid>
 """
 
 import argparse
@@ -247,21 +247,20 @@ def _load_wavelet(run_dir: Path):
 
 # ── run discovery ─────────────────────────────────────────────────────────────
 
-def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
+def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
     """
-    Scan weights/runs/ for all trained models.
-    Returns {run_name: {'denoise_fn', 'model_class', 'noise_type', 'is_hybrid',
-                        'dsge_basis', 'dsge_order', 'run_dir'}}
+    Scan a specific run directory for all trained model subfolders.
+    Returns {model_name: {'denoise_fn', 'model_class', 'noise_type', 'is_hybrid',
+                          'dsge_basis', 'dsge_order', 'run_dir'}}
     """
-    runs_dir = weights_dir / 'runs'
-    if not runs_dir.exists():
+    if not run_dir.exists():
         return {}
 
     entries = {}
-    for run_dir in sorted(runs_dir.iterdir()):
-        if not run_dir.is_dir():
+    for model_dir in sorted(run_dir.iterdir()):
+        if not model_dir.is_dir():
             continue
-        name = run_dir.name  # e.g. "UnetAutoencoder_gaussian"
+        name = model_dir.name  # e.g. "UnetAutoencoder_gaussian"
 
         # Parse noise type (last segment is gaussian or non_gaussian)
         for nt in ['non_gaussian', 'gaussian']:  # check longer first
@@ -273,24 +272,21 @@ def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
             print(f"  [skip] Cannot parse noise type from: {name}")
             continue
 
-        pth = run_dir / 'model_best.pth'
-        params_json = run_dir / 'best_params.json'
-
         try:
             if model_part == 'UnetAutoencoder':
-                fn = _load_unet(run_dir, cfg, nperseg)
+                fn = _load_unet(model_dir, cfg, nperseg)
                 mc = 'UnetAutoencoder'; is_hybrid = False
             elif model_part == 'ResNetAutoencoder':
-                fn = _load_resnet(run_dir, cfg, nperseg)
+                fn = _load_resnet(model_dir, cfg, nperseg)
                 mc = 'ResNetAutoencoder'; is_hybrid = False
             elif model_part == 'SpectrogramVAE':
-                fn = _load_vae(run_dir, cfg, nperseg)
+                fn = _load_vae(model_dir, cfg, nperseg)
                 mc = 'SpectrogramVAE'; is_hybrid = False
             elif model_part == 'TimeSeriesTransformer':
-                fn = _load_transformer(run_dir, cfg)
+                fn = _load_transformer(model_dir, cfg)
                 mc = 'TimeSeriesTransformer'; is_hybrid = False
             elif model_part == 'Wavelet':
-                fn = _load_wavelet(run_dir)
+                fn = _load_wavelet(model_dir)
                 mc = 'Wavelet'; is_hybrid = False
             elif model_part.startswith('HybridDSGE_UNet_'):
                 m = re.match(r'HybridDSGE_UNet_(\w+)_S(\d+)$', model_part)
@@ -298,7 +294,7 @@ def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                     print(f"  [skip] Cannot parse hybrid config from: {model_part}")
                     continue
                 basis, order = m.group(1), int(m.group(2))
-                fn = _load_hybrid(run_dir, cfg, basis, order, nperseg)
+                fn = _load_hybrid(model_dir, cfg, basis, order, nperseg)
                 mc = model_part; is_hybrid = True
             else:
                 print(f"  [skip] Unknown model: {model_part}")
@@ -314,7 +310,7 @@ def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
             'is_hybrid':   is_hybrid,
             'dsge_basis':  basis if is_hybrid else None,
             'dsge_order':  order if is_hybrid else None,
-            'run_dir':     run_dir,
+            'run_dir':     model_dir,
         }
         print(f"  Loaded: {name}")
 
@@ -323,19 +319,20 @@ def discover_runs(weights_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
 
 # ── evaluation ────────────────────────────────────────────────────────────────
 
-def cross_evaluate(entries: dict, test_dir: Path) -> dict:
+def cross_evaluate(entries: dict, test_dir: Path, batch_size: int = 512) -> dict:
     """
     Returns results[run_name][test_noise_type] = {
         'per_snr': {label: {MSE, SNR, snr_in_db, ...}},
         'overall': {MSE, MAE, RMSE, SNR},
     }
     """
+    from tqdm import tqdm
     results = {}
-    for name, info in entries.items():
-        print(f"  Evaluating: {name}")
+    for name, info in tqdm(entries.items(), desc="Evaluating models", unit="model"):
         results[name] = {}
-        for test_nt in NOISE_TYPES:
-            per_snr = evaluate_per_snr(info['denoise_fn'], test_dir, test_nt)
+        for test_nt in tqdm(NOISE_TYPES, desc=f"  {name[:28]}", leave=False, unit="noise"):
+            per_snr = evaluate_per_snr(info['denoise_fn'], test_dir, test_nt,
+                                       batch_size=batch_size)
             results[name][test_nt] = {
                 'per_snr': per_snr,
                 'overall': _aggregate(per_snr),
@@ -940,36 +937,47 @@ def generate_report_uk(results: dict, entries: dict, figures: list,
 
 def main():
     p = argparse.ArgumentParser(description='Cross-evaluation comparison report')
-    p.add_argument('--dataset',     required=True, help='Path to dataset folder')
-    p.add_argument('--weights-dir', default='',    help='Override weights dir')
-    p.add_argument('--nperseg',     type=int, default=128)
-    p.add_argument('--seed',        type=int, default=42)
+    p.add_argument('--run',     required=True,
+                   help='Path to a specific training run directory '
+                        '(e.g. dataset/runs/run_20260325_abcd1234)')
+    p.add_argument('--nperseg', type=int, default=128)
+    p.add_argument('--seed',    type=int, default=42)
     args = p.parse_args()
 
     np.random.seed(args.seed)
 
-    dataset_path = Path(args.dataset)
-    if not dataset_path.is_absolute():
-        dataset_path = ROOT / dataset_path
-    if not dataset_path.exists():
-        print(f'ERROR: dataset not found: {dataset_path}'); sys.exit(1)
+    run_path = Path(args.run)
+    if not run_path.is_absolute():
+        run_path = ROOT / run_path
+    if not run_path.exists():
+        print(f'ERROR: run directory not found: {run_path}'); sys.exit(1)
 
-    weights_dir  = Path(args.weights_dir) if args.weights_dir else dataset_path / 'weights'
-    test_dir     = dataset_path / 'test'
-    figures_dir  = weights_dir / 'figures'
+    # run_path = <dataset>/runs/run_<date>_<uid>  (new)
+    #          = <dataset>/weights/runs/run_<date>_<uid>  (legacy)
+    candidate = run_path.parent.parent
+    if not (candidate / 'dataset_config.json').exists():
+        candidate = candidate.parent
+    dataset_path = candidate
+    cfg_file     = dataset_path / 'dataset_config.json'
+    if not cfg_file.exists():
+        print(f'ERROR: dataset_config.json not found at {dataset_path}'); sys.exit(1)
+
+    test_dir    = dataset_path / 'test'
+    figures_dir = run_path / 'figures'
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     if not test_dir.exists():
         print(f'ERROR: test directory not found: {test_dir}'); sys.exit(1)
 
-    with open(dataset_path / 'dataset_config.json') as f:
+    with open(cfg_file) as f:
         cfg = json.load(f)
 
     print(f'\nDataset : {dataset_path.name}')
-    print(f'\nLoading models from {weights_dir / "runs"} ...')
-    entries = discover_runs(weights_dir, cfg, args.nperseg)
+    print(f'Run     : {run_path.name}')
+    print(f'\nLoading models from {run_path} ...')
+    entries = discover_runs(run_path, cfg, args.nperseg)
     if not entries:
-        print('ERROR: no trained models found. Run train/train_all.py first.')
+        print('ERROR: no trained models found in the run directory.')
         sys.exit(1)
 
     print(f'\nRunning cross-evaluation ({len(entries)} models × 2 test sets)...')
@@ -978,9 +986,9 @@ def main():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     print(f'\nExporting data...')
-    csv_path = export_csv(results, entries, weights_dir, timestamp)
+    csv_path = export_csv(results, entries, run_path, timestamp)
 
-    json_path = weights_dir / f'comparison_data_{timestamp}.json'
+    json_path = run_path / f'comparison_data_{timestamp}.json'
     json_results = {
         k: {nt: {'overall': v[nt]['overall'], 'per_snr': v[nt]['per_snr']}
             for nt in NOISE_TYPES}
@@ -1001,11 +1009,11 @@ def main():
 
     print(f'\nGenerating reports...')
     generate_report_en(results, entries, figures, dataset_path.name,
-                       weights_dir, timestamp, csv_path)
+                       run_path, timestamp, csv_path)
     generate_report_uk(results, entries, figures, dataset_path.name,
-                       weights_dir, timestamp, csv_path)
+                       run_path, timestamp, csv_path)
 
-    print(f'\n✅ Done. Output saved to: {weights_dir}')
+    print(f'\n✅ Done. Output saved to: {run_path}')
 
 
 if __name__ == '__main__':

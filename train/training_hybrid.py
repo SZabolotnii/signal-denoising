@@ -346,7 +346,7 @@ class HybridUnetTrainer:
         if self.output_dir is not None:
             run_dir = self.output_dir / f"{self.model_name}_{self.noise_type}"
         else:
-            run_dir = self.dataset_path / "weights" / "runs" / f"run_{self.run_date}_{self.run_id}_{self.model_name}_{self.noise_type}"
+            run_dir = self.dataset_path / "runs" / f"run_{self.run_date}_{self.run_id}_{self.model_name}_{self.noise_type}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         model_path = run_dir / "model_best.pth"

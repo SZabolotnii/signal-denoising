@@ -58,10 +58,10 @@ MODEL_BATCH_SIZES = {
 # --lr overrides all of these when explicitly provided.
 MODEL_LEARNING_RATES = {
     "transformer": 1e-3,  # stuck at 1e-4; 10× increase needed to escape init plateau
-    "unet":        3e-4,
-    "vae":         3e-4,
-    "resnet":      3e-4,
-    "hybrid":      3e-4,
+    "unet":        1e-3,
+    "vae":         1e-3,
+    "resnet":      1e-3,
+    "hybrid":      1e-3,
     "wavelet":     None,  # not applicable (grid search)
 }
 
@@ -333,12 +333,9 @@ def main():
           f"batch={args.batch_size}, lr={lr_display}"
           + (f", partial={args.partial_train:.0%}" if args.partial_train < 1.0 else ""))
 
-    weights_dir = dataset_dir / "weights"
-    weights_dir.mkdir(exist_ok=True)
-
     run_date = datetime.now().strftime("%Y%m%d")
     run_uid  = _uuid_mod.uuid4().hex[:8]
-    shared_run_dir = weights_dir / "runs" / f"run_{run_date}_{run_uid}"
+    shared_run_dir = dataset_dir / "runs" / f"run_{run_date}_{run_uid}"
     shared_run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run dir : {shared_run_dir.relative_to(dataset_dir)}")
     args.shared_run_dir = shared_run_dir
@@ -380,8 +377,8 @@ def main():
                 except Exception:
                     pass
 
-    generate_report(results, dataset_dir, args, weights_dir)
-    print(f"\n✅ Done. Weights and report saved to: {weights_dir}")
+    generate_report(results, dataset_dir, args, shared_run_dir)
+    print(f"\n✅ Done. Weights and report saved to: {shared_run_dir}")
 
 
 if __name__ == "__main__":

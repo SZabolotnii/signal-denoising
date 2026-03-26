@@ -178,10 +178,12 @@ DATASET=data_generation/datasets/<назва_датасету>
 python train/train_all.py --dataset $DATASET
 
 # 2. Порівняльний звіт із крос-оцінкою та графіками
-python train/compare_report.py --dataset $DATASET
+#    RUN — конкретна папка рану, наприклад:
+#    data_generation/datasets/<name>/runs/run_20260325_abcd1234
+python train/compare_report.py --run $RUN
 ```
 
-Готово. Звіти та графіки збережено в `<dataset>/weights/`.
+Готово. Звіти та графіки збережено в папці рану (`<dataset>/runs/<run>/`).
 
 ---
 
