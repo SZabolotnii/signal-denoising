@@ -61,7 +61,7 @@ MODEL_LEARNING_RATES = {
     "unet":        1e-3,
     "vae":         1e-3,
     "resnet":      1e-3,
-    "hybrid":      1e-3,
+    "hybrid":      3e-4,
     "wavelet":     None,  # not applicable (grid search)
 }
 
