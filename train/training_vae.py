@@ -238,7 +238,7 @@ class VAETrainer:
         best_sd = None
         train_history, val_snr_history = [], []
         no_improve = 0
-        early_stop_patience = 7
+        early_stop_patience = 5
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
