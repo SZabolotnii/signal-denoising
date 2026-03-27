@@ -298,7 +298,7 @@ python train/sweep_hybrid.py --dataset $DATASET --wandb-project signal-denoising
 
 ```bash
 # Крос-оцінка всіх натренованих моделей + звіт
-python train/compare_report.py --dataset $DATASET
+python train/compare_report.py --run $RUN
 ```
 
 Скрипт автоматично знаходить всі `.pth` і `.json` у `weights/`, оцінює кожну
