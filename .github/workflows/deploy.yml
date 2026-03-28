@@ -1,0 +1,239 @@
+name: CD - Deploy to RunPod
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_type:
+        description: 'GPU Type'
+        required: true
+        type: choice
+        default: 'NVIDIA RTX A5000'
+        options:
+          - NVIDIA GeForce RTX 3090
+          - NVIDIA GeForce RTX 4090
+          - NVIDIA RTX A2000
+          - NVIDIA RTX A4000
+          - NVIDIA RTX A4500
+          - NVIDIA RTX A5000
+          - NVIDIA RTX A6000
+      data_center:
+        description: 'Data Center to deploy Pod. Please make sure the chosen GPU Type is available is available in the data center.'
+        required: true
+        type: choice
+        default: 'CA-MTL-1'
+        options:
+          - CA-MTL-1
+          - CA-MTL-2
+          - CA-MTL-3
+          - CA-MTL-4
+          - US-CA-2
+          - US-GA-2
+          - US-IL-1
+          - US-KS-2
+          - US-MD-1
+          - US-MO-1
+          - US-MO-2
+          - US-NC-1
+          - US-NC-2
+          - US-TX-3
+          - US-TX-4
+          - US-WA-1
+          - EU-FR-1
+          - EU-NL-1
+          - EU-RO-1
+      replace_existing_pod:
+        description: 'Replace existing pod (terminate old pod before deploying new one). Note: if you do not choose to use network volume, this may likely cause data loss!'
+        required: false
+        type: boolean
+        default: true
+      use_network_volume:
+        description: 'Use Network Volume to store app data (this survives pod termination/recreation)'
+        required: false
+        type: boolean
+        default: true
+      use_spot:
+        description: 'Use Spot Instance (cheaper but can be interrupted)'
+        required: false
+        type: boolean
+        default: false
+      extra_envs:
+        description: |
+          Extra environment variables (KEY=VALUE pairs) to pass to the Pod runtime
+          Format: space-separated, comma-separated, or one per line
+          Example: DEBUG=true LOG_LEVEL=info
+        required: false
+        type: string
+        default: ''
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: signal-denoising/signal-denoising-train
+  POD_NAME: signal-denoising-train
+  TEMPLATE_NAME: signal-denoising-train
+  REGISTRY_NAME: ecr-signal-denoising
+  DATA_CENTER_ID: ${{ github.event.inputs.data_center }}
+  NETWORK_VOLUME_NAME: signal-denoising-train-network
+  NETWORK_VOLUME_SIZE_GB: 30
+  VOLUME_SIZE_GB: 30
+  VOLUME_MOUNT_PATH: /app/data
+
+jobs:
+  deploy:
+    name: Deploy to RunPod
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get ECR image details
+        id: image
+        run: |
+          REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG="latest"
+          IMAGE_URI="${REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          ECR_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "token=${ECR_TOKEN}" >> $GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install RunPod SDK
+        run: pip install runpod
+
+      - name: Create/Update Registry Credentials
+        id: registry
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          #!/bin/bash
+          set -e
+          export REGISTRY_NAME="${{ env.REGISTRY_NAME }}"
+          export ECR_TOKEN="${{ steps.image.outputs.token }}"
+          cd .github/scripts
+          python runpod_manage_ecr_creds.py
+
+      - name: Create/Update Template
+        id: template
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          #!/bin/bash
+          set -e
+          export TEMPLATE_NAME="${{ env.TEMPLATE_NAME }}"
+          export IMAGE_URI="${{ steps.image.outputs.image_uri }}"
+          export REGISTRY_ID="${{ steps.registry.outputs.registry_id }}"
+          export VOLUME_SIZE_GB=${{ env.VOLUME_SIZE_GB }}
+          export VOLUME_MOUTH_PATH="${{ env.VOLUME_MOUTH_PATH }}"
+          export OMP_NUM_THREADS="${{ env.OMP_NUM_THREADS }}"
+          export MKL_NUM_THREADS="${{ env.MKL_NUM_THREADS }}"
+          export EXTRA_ENVS_STR="${{ inputs.extra_envs }}"
+          export MAX_SEGMENT_SECONDS="${{ env.MAX_SEGMENT_SECONDS }}"
+          
+          cd .github/scripts
+          python runpod_manage_template.py
+
+      - name: Ensure Network Volume exists
+        id: volume
+        if: github.event.inputs.use_network_volume == 'true'
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          #!/bin/bash
+          set -e
+          export NETWORK_VOLUME_NAME="${{ env.NETWORK_VOLUME_NAME }}"
+          export NETWORK_VOLUME_SIZE_GB=${{ env.NETWORK_VOLUME_SIZE_GB }}
+          export DATA_CENTER_ID="${{ env.DATA_CENTER_ID }}"
+
+          cd .github/scripts
+          python runpod_manage_network_volume.py          
+
+      - name: Deploy Pod
+        id: pod
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          #!/bin/bash
+          set -e
+          export TEMPLATE_NAME="${{ env.TEMPLATE_NAME }}"
+          export POD_NAME="${{ env.POD_NAME }}"
+          export TEMPLATE_ID="${{ steps.template.outputs.template_id }}"
+          export IMAGE_URI="${{ steps.image.outputs.image_uri }}"
+          export GPU_TYPE="${{ inputs.gpu_type }}"
+          export USE_SPOT="${{ inputs.use_spot }}"
+          export USE_NETWORK_VOLUME="${{ inputs.use_network_volume }}"
+          export REPLACE="${{ inputs.replace_existing_pod }}"
+          export DATA_CENTER_ID="${{ env.DATA_CENTER_ID }}"
+          export VOLUME_SIZE_GB="${{ env.VOLUME_SIZE_GB }}"
+          export VOLUME_MOUTH_PATH="${{ env.VOLUME_MOUTH_PATH }}"
+          
+          if [[ "${USE_NETWORK_VOLUME}" == "true" ]]; then
+            export NETWORK_VOLUME_ID="${{ steps.volume.outputs.network_volume_id }}"
+          fi 
+          
+          cd .github/scripts
+          python runpod_manage_pod.py
+
+#      - name: Test Deployment
+#        if: steps.pod.outputs.action == 'deployed'
+#        run: |
+#          echo "Waiting for application to start..."
+#          sleep 60
+#
+#          for i in {1..10}; do
+#            if curl -f -m 10 "${{ steps.pod.outputs.pod_url }}" 2>/dev/null; then
+#              echo "✅ Application responding!"
+#              exit 0
+#            fi
+#            echo "Attempt $i/10 failed, retrying..."
+#            sleep 15
+#          done
+#
+#          echo "⚠️  Application not responding yet"
+#          echo "Check RunPod dashboard for logs"
+
+      - name: Deployment Summary
+        if: steps.pod.outputs.action == 'deployed'
+        run: |
+          echo "## 🚀 Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Pod ID** | \`${{ steps.pod.outputs.pod_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Pod URL** | [${{ steps.pod.outputs.pod_url }}](${{ steps.pod.outputs.pod_url }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Template** | \`${{ steps.template.outputs.template_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Registry** | \`${{ steps.registry.outputs.registry_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GPU** | ${{ inputs.gpu_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Data Center** | ${{ env.DATA_CENTER_ID }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | \`${{ steps.image.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ inputs.use_network_volume }}" == "true" ]]; then
+            echo "| **Network Volume** | \`${{ steps.volume.outputs.network_volume_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Skipped Summary
+        if: steps.pod.outputs.action == 'skipped'
+        run: |
+          echo "## ⚠️ Deployment Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Pod \`${{ env.POD_NAME }}\` already exists." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Pod URL:** ${{ steps.pod.outputs.pod_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To replace, run with ☑ 'Replace existing pod' checked." >> $GITHUB_STEP_SUMMARY
