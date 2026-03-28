@@ -35,7 +35,7 @@ MODEL_NAME = 'ResNetAutoencoder'
 
 class ResNetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=1024, epochs=50, learning_rate=3e-4,
+                 batch_size=1024, epochs=50, learning_rate=6e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
                  wandb_project="", data_fraction=1.0, output_dir=None):
         self.dataset_path = Path(dataset_path)

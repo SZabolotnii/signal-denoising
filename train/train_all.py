@@ -59,8 +59,8 @@ MODEL_BATCH_SIZES = {
 MODEL_LEARNING_RATES = {
     "transformer": 1e-3,  # stuck at 1e-4; 10× increase needed to escape init plateau
     "unet":        1e-3,
-    "vae":         1e-3,
-    "resnet":      1e-3,
+    "vae":         6e-4,
+    "resnet":      6e-4,
     "hybrid":      3e-4,
     "wavelet":     None,  # not applicable (grid search)
 }
