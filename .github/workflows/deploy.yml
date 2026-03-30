@@ -143,6 +143,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Generate Run ID
+        id: run_id
+        run: |
+          RUN_DATE=$(date +'%Y%m%d')
+          RUN_UID=$(openssl rand -hex 4)
+          RUN_ID="run_${RUN_DATE}_${RUN_UID}_github_${{ github.run_number }}"
+          echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
+          echo "🚀 Generated Run ID: ${RUN_ID}"
+
       - name: Install RunPod SDK
         run: pip install runpod
 
@@ -174,6 +183,7 @@ jobs:
           export WANDB_PROJECT="${{ inputs.wandb_project }}"
           export EXTRA_DOCKER_ARGS="${{ inputs.extra_docker_args }}"
           export MODEL="${{ inputs.model }}"
+          export RUN_ID="${{ steps.run_id.outputs.run_id }}"
           export RUNPOD_API_KEY_SECRET="${{ secrets.WANDB_API_KEY }}"
           export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
           export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"

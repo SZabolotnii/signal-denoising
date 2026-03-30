@@ -59,6 +59,7 @@ if __name__ == '__main__':
     WANDB_PROJECT = os.environ['WANDB_PROJECT']
     EXTRA_DOCKER_ARGS = os.environ['EXTRA_DOCKER_ARGS']
     MODEL = os.environ.get('MODEL', 'all')
+    RUN_ID = os.environ.get('RUN_ID', '')
     WANDB_API_KEY_SECRET = os.environ.get('RUNPOD_API_KEY_SECRET', '')
     AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
     AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
@@ -73,6 +74,8 @@ if __name__ == '__main__':
         docker_args += f" --wandb-project {WANDB_PROJECT}"
     if MODEL:
         docker_args += f" --models {MODEL}"
+    if RUN_ID:
+        docker_args += f" --run-id {RUN_ID}"
     if EXTRA_DOCKER_ARGS:
         docker_args += f" {EXTRA_DOCKER_ARGS}"
 
