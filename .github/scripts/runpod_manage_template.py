@@ -106,6 +106,7 @@ if __name__ == '__main__':
     # Base environment variables for the training script
     base_env_vars = [
         {"key": "PYTHONUNBUFFERED", "value": "1"},
+        {"key": "CLOUD_TRAINING", "value": "True"},
     ]
     if WANDB_API_KEY_SECRET:
         base_env_vars.append({"key": "WANDB_API_KEY", "value": WANDB_API_KEY_SECRET})
