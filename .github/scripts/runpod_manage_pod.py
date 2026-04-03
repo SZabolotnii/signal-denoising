@@ -33,13 +33,10 @@ DEPLOY_SCOPE = os.environ.get("DEPLOY_SCOPE", "EU+US").upper()
 # Keep these to known/current IDs from Runpod docs/examples.
 # ----------------------------
 EU_DCS = [
-    "EU-FR-1",
     "EU-NL-1",
     "EU-RO-1",
     "EU-CZ-1",
-    "EU-SE-1",
     "EUR-IS-1",
-    "EUR-IS-2",
     "EUR-IS-3",
     "EUR-NO-1",
 ]
@@ -47,20 +44,15 @@ EU_DCS = [
 US_DCS = [
     "US-IL-1",
     "US-TX-3",
-    "US-TX-4",
     "US-KS-2",
-    "US-KS-3",
-    "US-GA-1",
     "US-GA-2",
     "US-WA-1",
-    "US-CA-2",
+    "US-MO-2",
     "US-NC-1",
-    "US-DE-1",
 ]
 
 CA_DCS = [
-    "CA-MTL-1",
-    "CA-MTL-2",
+    "CA-MTL-4",
     "CA-MTL-3",
 ]
 
