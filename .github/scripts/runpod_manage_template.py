@@ -65,6 +65,7 @@ if __name__ == '__main__':
     AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
     S3_BUCKET = os.environ.get('S3_BUCKET', '')
     EXTRA_ENVS_STR = os.environ['EXTRA_ENVS_STR']
+    RUNPOD_POD_ID = os.environ.get('RUNPOD_POD_ID', '')
 
     print(f"Managing template: {TEMPLATE_NAME}")
 
@@ -110,12 +111,17 @@ if __name__ == '__main__':
     ]
     if WANDB_API_KEY_SECRET:
         base_env_vars.append({"key": "WANDB_API_KEY", "value": WANDB_API_KEY_SECRET})
+    if not any(v["key"] == "RUNPOD_API_KEY" for v in base_env_vars) and WANDB_API_KEY_SECRET:
+        # Also provide it as RUNPOD_API_KEY for the termination script if not already there
+        base_env_vars.append({"key": "RUNPOD_API_KEY", "value": WANDB_API_KEY_SECRET})
     if AWS_ACCESS_KEY_ID:
         base_env_vars.append({"key": "AWS_ACCESS_KEY_ID", "value": AWS_ACCESS_KEY_ID})
     if AWS_SECRET_ACCESS_KEY:
         base_env_vars.append({"key": "AWS_SECRET_ACCESS_KEY", "value": AWS_SECRET_ACCESS_KEY})
     if S3_BUCKET:
         base_env_vars.append({"key": "S3_BUCKET", "value": S3_BUCKET})
+    if RUNPOD_POD_ID:
+        base_env_vars.append({"key": "RUNPOD_POD_ID", "value": RUNPOD_POD_ID})
 
     # Parse extra environment variables
     extra_env_vars = parse_extra_envs(EXTRA_ENVS_STR)

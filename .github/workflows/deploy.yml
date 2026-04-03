@@ -18,6 +18,7 @@ on:
           - NVIDIA RTX A4500
           - NVIDIA RTX A5000
           - NVIDIA RTX A6000
+
       deploy_scope:
         description: 'Region scope for auto-placement'
         required: true
@@ -28,21 +29,25 @@ on:
           - US
           - EU+US
           - ALL
+
+      storage_size_gb:
+        description: 'Pod volume size in GB for dataset, checkpoints, and logs'
+        required: true
+        type: string
+        default: '150'
+
       replace_existing_pod:
-        description: 'Replace existing pod (terminate old pod before deploying new one). Note: if you do not choose to use network volume, this may likely cause data loss!'
+        description: 'Replace existing pod (terminate old pod before deploying new one)'
         required: false
         type: boolean
         default: true
-      use_network_volume:
-        description: 'Use Network Volume to store app data (this survives pod termination/recreation)'
-        required: false
-        type: boolean
-        default: true
+
       use_spot:
         description: 'Use Spot Instance (cheaper but can be interrupted)'
         required: false
         type: boolean
         default: false
+
       extra_envs:
         description: |
           Extra environment variables (KEY=VALUE pairs) to pass to the Pod runtime
@@ -51,21 +56,25 @@ on:
         required: false
         type: string
         default: ''
+
       dataset_path:
         description: 'Dataset name (to download from S3) or path inside the pod'
         required: true
         type: string
         default: 'deep_space_polygauss_qpsk_bs1024_n3000_993897f3'
+
       wandb_project:
         description: 'W&B Project name for logging'
         required: false
         type: string
         default: 'signal-denoising-v2'
+
       extra_docker_args:
         description: 'Additional CLI arguments to pass to the entrypoint'
         required: false
         type: string
         default: ''
+
       model:
         description: 'Model to train'
         required: true
@@ -79,6 +88,7 @@ on:
           - transformer
           - hybrid
           - wavelet
+
       image_tag:
         description: 'Docker image tag (e.g., latest, containerize-training)'
         required: true
@@ -91,10 +101,6 @@ env:
   POD_NAME: signal-denoising-train
   TEMPLATE_NAME: signal-denoising-train
   REGISTRY_NAME: ecr-signal-denoising
-  DATA_CENTER_ID: ${{ github.event.inputs.data_center }}
-  NETWORK_VOLUME_NAME: signal-denoising-train-network
-  NETWORK_VOLUME_SIZE_GB: 30
-  VOLUME_SIZE_GB: 30
   VOLUME_MOUNT_PATH: /app/data
 
 jobs:
@@ -124,7 +130,7 @@ jobs:
           IMAGE_TAG="${{ github.event.inputs.image_tag }}"
           IMAGE_URI="${REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
           ECR_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
-          
+
           echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
@@ -169,7 +175,7 @@ jobs:
           export TEMPLATE_NAME="${{ env.TEMPLATE_NAME }}"
           export IMAGE_URI="${{ steps.image.outputs.image_uri }}"
           export REGISTRY_ID="${{ steps.registry.outputs.registry_id }}"
-          export VOLUME_SIZE_GB=${{ env.VOLUME_SIZE_GB }}
+          export VOLUME_SIZE_GB="${{ inputs.storage_size_gb }}"
           export VOLUME_MOUNT_PATH="${{ env.VOLUME_MOUNT_PATH }}"
           export DATASET_PATH="${{ inputs.dataset_path }}"
           export WANDB_PROJECT="${{ inputs.wandb_project }}"
@@ -177,29 +183,15 @@ jobs:
           export MODEL="${{ inputs.model }}"
           export RUN_ID="${{ steps.run_id.outputs.run_id }}"
           export IMAGE_TAG="${{ inputs.image_tag }}"
-          export RUNPOD_API_KEY_SECRET="${{ secrets.WANDB_API_KEY }}"
+          export RUNPOD_API_KEY_SECRET="${{ secrets.RUNPOD_API_KEY }}"
           export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
           export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           export S3_BUCKET="${{ secrets.S3_BUCKET }}"
+          export WANDB_API_KEY="${{ secrets.WANDB_API_KEY }}"
           export EXTRA_ENVS_STR="${{ inputs.extra_envs }}"
-          
+
           cd .github/scripts
           python runpod_manage_template.py
-
-      - name: Ensure Network Volume exists
-        id: volume
-        if: github.event.inputs.use_network_volume == 'true'
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-        run: |
-          #!/bin/bash
-          set -e
-          export NETWORK_VOLUME_NAME="${{ env.NETWORK_VOLUME_NAME }}"
-          export NETWORK_VOLUME_SIZE_GB=${{ env.NETWORK_VOLUME_SIZE_GB }}
-          export DATA_CENTER_ID="${{ env.DATA_CENTER_ID }}"
-
-          cd .github/scripts
-          python runpod_manage_network_volume.py          
 
       - name: Deploy Pod
         id: pod
@@ -214,36 +206,44 @@ jobs:
           export IMAGE_URI="${{ steps.image.outputs.image_uri }}"
           export GPU_TYPE="${{ inputs.gpu_type }}"
           export USE_SPOT="${{ inputs.use_spot }}"
-          export USE_NETWORK_VOLUME="${{ inputs.use_network_volume }}"
+          export USE_NETWORK_VOLUME="false"
           export REPLACE="${{ inputs.replace_existing_pod }}"
-          export DATA_CENTER_ID="${{ env.DATA_CENTER_ID }}"
-          export VOLUME_SIZE_GB="${{ env.VOLUME_SIZE_GB }}"
-          export VOLUME_MOUTH_PATH="${{ env.VOLUME_MOUTH_PATH }}"
-          
-          if [[ "${USE_NETWORK_VOLUME}" == "true" ]]; then
-            export NETWORK_VOLUME_ID="${{ steps.volume.outputs.network_volume_id }}"
-          fi 
-          
+          export DATA_CENTER_ID="AUTO"
+          export DEPLOY_SCOPE="${{ inputs.deploy_scope }}"
+          export VOLUME_SIZE_GB="${{ inputs.storage_size_gb }}"
+          export VOLUME_MOUNT_PATH="${{ env.VOLUME_MOUNT_PATH }}"
+
           cd .github/scripts
           python runpod_manage_pod.py
 
-#      - name: Test Deployment
-#        if: steps.pod.outputs.action == 'deployed'
-#        run: |
-#          echo "Waiting for application to start..."
-#          sleep 60
-#
-#          for i in {1..10}; do
-#            if curl -f -m 10 "${{ steps.pod.outputs.pod_url }}" 2>/dev/null; then
-#              echo "✅ Application responding!"
-#              exit 0
-#            fi
-#            echo "Attempt $i/10 failed, retrying..."
-#            sleep 15
-#          done
-#
-#          echo "⚠️  Application not responding yet"
-#          echo "Check RunPod dashboard for logs"
+      - name: Update Template with Pod ID
+        id: update_template
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          #!/bin/bash
+          set -e
+          export TEMPLATE_NAME="${{ env.TEMPLATE_NAME }}"
+          export IMAGE_URI="${{ steps.image.outputs.image_uri }}"
+          export REGISTRY_ID="${{ steps.registry.outputs.registry_id }}"
+          export VOLUME_SIZE_GB="${{ inputs.storage_size_gb }}"
+          export VOLUME_MOUNT_PATH="${{ env.VOLUME_MOUNT_PATH }}"
+          export DATASET_PATH="${{ inputs.dataset_path }}"
+          export WANDB_PROJECT="${{ inputs.wandb_project }}"
+          export EXTRA_DOCKER_ARGS="${{ inputs.extra_docker_args }}"
+          export MODEL="${{ inputs.model }}"
+          export RUN_ID="${{ steps.run_id.outputs.run_id }}"
+          export IMAGE_TAG="${{ inputs.image_tag }}"
+          export RUNPOD_API_KEY_SECRET="${{ secrets.RUNPOD_API_KEY }}"
+          export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+          export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+          export S3_BUCKET="${{ secrets.S3_BUCKET }}"
+          export WANDB_API_KEY="${{ secrets.WANDB_API_KEY }}"
+          export EXTRA_ENVS_STR="${{ inputs.extra_envs }}"
+          export RUNPOD_POD_ID="${{ steps.pod.outputs.pod_id }}"
+
+          cd .github/scripts
+          python runpod_manage_template.py
 
       - name: Deployment Summary
         if: steps.pod.outputs.action == 'deployed'
@@ -257,11 +257,10 @@ jobs:
           echo "| **Template** | \`${{ steps.template.outputs.template_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Registry** | \`${{ steps.registry.outputs.registry_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **GPU** | ${{ inputs.gpu_type }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Data Center** | ${{ env.DATA_CENTER_ID }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Deploy Scope** | ${{ inputs.deploy_scope }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Chosen Data Center** | ${{ steps.pod.outputs.datacenter }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Storage Size** | ${{ inputs.storage_size_gb }} GB |" >> $GITHUB_STEP_SUMMARY
           echo "| **Image** | \`${{ steps.image.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ inputs.use_network_volume }}" == "true" ]]; then
-            echo "| **Network Volume** | \`${{ steps.volume.outputs.network_volume_id }}\` |" >> $GITHUB_STEP_SUMMARY
-          fi
 
       - name: Skipped Summary
         if: steps.pod.outputs.action == 'skipped'
@@ -272,4 +271,4 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Pod URL:** ${{ steps.pod.outputs.pod_url }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "To replace, run with ☑ 'Replace existing pod' checked." >> $GITHUB_STEP_SUMMARY
+          echo "To replace, run with 'Replace existing pod' checked." >> $GITHUB_STEP_SUMMARY
