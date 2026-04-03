@@ -251,7 +251,6 @@ def build_mutation_for_dc(dc: str) -> str:
       }}) {{
         id
         desiredStatus
-        dataCenterId
       }}
     }}
     """
@@ -279,7 +278,7 @@ def deploy_with_fallback(dcs_to_try: List[str]) -> Dict[str, Any]:
             print(f"Deployment initiated in {dc}")
             return {
                 "pod_id": pod_data["id"],
-                "final_dc": pod_data.get("dataCenterId") or dc,
+                "final_dc": dc,
                 "desired_status": pod_data.get("desiredStatus", "unknown"),
             }
 
