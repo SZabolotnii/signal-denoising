@@ -77,8 +77,8 @@ BASE_MODELS = list(MODEL_DISPLAY.keys())
 # ── model loaders ─────────────────────────────────────────────────────────────
 
 def _device():
-    import torch
-    return 'cuda' if torch.cuda.is_available() else 'cpu'
+    from train.device_utils import get_device
+    return str(get_device())
 
 
 def _load_unet(run_dir: Path, cfg: dict, nperseg: int = 128):

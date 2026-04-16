@@ -34,6 +34,8 @@ try:
 except Exception:
     WANDB_OK = False
 
+from train.device_utils import get_device, empty_cache, get_batch_size_multiplier
+
 # Transformer first — largest VRAM consumer (O(T²) attention), trains safely
 # before GPU memory gets fragmented by smaller models.
 ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
@@ -66,6 +68,15 @@ MODEL_LEARNING_RATES = {
 }
 
 
+def _resolve_batch_size(args, model_key: str) -> int:
+    """Return explicit --batch-size if given, else default × device multiplier."""
+    if args.batch_size is not None:
+        return args.batch_size
+    base = MODEL_BATCH_SIZES[model_key]
+    mult = getattr(args, '_bs_mult', 1.0)
+    return int(base * mult)
+
+
 # ── model runners ─────────────────────────────────────────────────────────────
 
 def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
@@ -73,7 +84,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== UNet (Mask + STFT, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["unet"]
+    bs = _resolve_batch_size(args, "unet")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["unet"]
     return UnetAutoencoderTrainer(
         dataset_path=dataset_dir,
@@ -89,6 +100,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        device=args.device,
     ).train()
 
 
@@ -97,7 +109,7 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== ResNet (STFT autoencoder, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["resnet"]
+    bs = _resolve_batch_size(args, "resnet")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["resnet"]
     return ResNetAutoencoderTrainer(
         dataset_path=dataset_dir,
@@ -112,6 +124,7 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        device=args.device,
     ).train()
 
 
@@ -120,7 +133,7 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== VAE (SpectrogramVAE, MSELoss + KL) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["vae"]
+    bs = _resolve_batch_size(args, "vae")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["vae"]
     return VAETrainer(
         dataset_path=dataset_dir,
@@ -135,6 +148,7 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        device=args.device,
     ).train()
 
 
@@ -143,7 +157,7 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== Transformer (time-domain, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["transformer"]
+    bs = _resolve_batch_size(args, "transformer")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["transformer"]
     return TransformerTrainer(
         dataset_path=dataset_dir,
@@ -155,6 +169,7 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        device=args.device,
     ).train()
 
 
@@ -190,7 +205,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== HybridDSGE_UNet (robust basis S=3, U-Net mask, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["hybrid"]
+    bs = _resolve_batch_size(args, "hybrid")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["hybrid"]
     return HybridUnetTrainer(
         dataset_path=dataset_dir,
@@ -208,6 +223,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        device=args.device,
     ).train()
 
 
@@ -302,6 +318,9 @@ def parse_args():
                    help="W&B project name (empty = disable)")
     p.add_argument("--partial-train", type=float, default=1.0, metavar="FRACTION",
                    help="Fraction of dataset to use (0 < f <= 1). Useful for quick debug runs.")
+    p.add_argument("--device", default=None,
+                   choices=["cuda", "mps", "cpu", "auto"],
+                   help="Force a specific device (default: auto-detect cuda → mps → cpu)")
     return p.parse_args()
 
 
@@ -318,6 +337,15 @@ def main():
     with open(dataset_dir / "dataset_config.json") as f:
         cfg = json.load(f)
 
+    # Resolve device and apply batch-size scaling for MPS / large-memory systems.
+    device_pref = args.device if args.device != 'auto' else None
+    resolved_device = get_device(device_pref)
+    bs_mult = get_batch_size_multiplier(resolved_device)
+    args.device = str(resolved_device)          # pass as string to trainer constructors
+    args._device = resolved_device              # torch.device for empty_cache()
+    args._bs_mult = bs_mult                     # for _resolve_batch_size()
+
+    print(f"Device  : {resolved_device}" + (f" (batch multiplier ×{bs_mult:.1f})" if bs_mult != 1.0 else ""))
     print(f"Dataset : {dataset_dir.name}")
     print(f"Config  : block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
           f"scenario={cfg.get('scenario', '?')}")
@@ -372,8 +400,7 @@ def main():
             finally:
                 gc.collect()
                 try:
-                    import torch
-                    torch.cuda.empty_cache()
+                    empty_cache(args._device)
                 except Exception:
                     pass
 

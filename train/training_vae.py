@@ -37,7 +37,7 @@ class VAETrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
                  batch_size=2048, epochs=50, learning_rate=6e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
-                 wandb_project="", data_fraction=1.0, output_dir=None,
+                 wandb_project="", data_fraction=1.0, output_dir=None, device=None,
                  kl_beta: float = 1e-3, kl_warmup_epochs: int = 5,
                  ):
         self.dataset_path = Path(dataset_path)
@@ -53,7 +53,8 @@ class VAETrainer:
         self.random_state = random_state
         self.data_fraction = data_fraction
         self.output_dir = Path(output_dir) if output_dir is not None else None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        from train.device_utils import get_device
+        self.device = get_device(device)
 
         # VAE-specific loss weighting
         self.kl_beta = float(kl_beta)
@@ -165,14 +166,12 @@ class VAETrainer:
             "n_examples": int(n_stats),
         }
 
-        pin = torch.cuda.is_available()
+        from train.device_utils import get_dataloader_kwargs
+        dl_kw = get_dataloader_kwargs(self.device)
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(val_set,   batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(test_set,  batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True, **dl_kw),
+            DataLoader(val_set,   batch_size=self.batch_size, **dl_kw),
+            DataLoader(test_set,  batch_size=self.batch_size, **dl_kw),
             freq_bins, time_frames,
             norm_stats,
         )
@@ -243,8 +242,8 @@ class VAETrainer:
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             total_loss = 0.0
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
+            from train.device_utils import reset_peak_memory
+            reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
             for X_batch, y_batch in pbar:
@@ -265,8 +264,8 @@ class VAETrainer:
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
 
-            vram_str = (f" | vram={torch.cuda.max_memory_allocated() / 1024**3:.2f}GB"
-                        if torch.cuda.is_available() else "")
+            from train.device_utils import format_vram_str
+            vram_str = format_vram_str(self.device)
 
             val_loss = self._compute_val_loss(recon_loss)
             val_snr  = self._compute_val_snr()

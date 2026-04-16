@@ -178,7 +178,8 @@ def main():
     print(f"DSGE      : {dsge}")
 
     # ── Load model ─────────────────────────────────────────────
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from train.device_utils import get_device
+    device = get_device()
     print(f"Device    : {device}\n")
 
     # Determine input_shape from one signal
