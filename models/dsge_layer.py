@@ -31,8 +31,23 @@ def fractional_basis(x: np.ndarray, powers: list[float]) -> np.ndarray:
 
 
 def polynomial_basis(x: np.ndarray, powers: list[float]) -> np.ndarray:
-    """Поліноміальний базис: φᵢ(x) = x^pᵢ  (цілі степені)."""
-    return np.array([x ** int(p) for p in powers])
+    """Поліноміальний базис: φᵢ(x) = x^pᵢ  (цілі степені ≥ 2, без лінійного x¹).
+
+    DSGE decomposition requires strictly nonlinear basis functions —
+    linear term φ(x) = x is excluded because it makes Z = 0 trivially.
+    Powers < 2 are silently skipped with a warning.
+    """
+    valid = [p for p in powers if int(p) >= 2]
+    if len(valid) < len(powers):
+        skipped = [p for p in powers if int(p) < 2]
+        import warnings
+        warnings.warn(
+            f"polynomial_basis: skipping linear/constant powers {skipped} — "
+            f"DSGE requires strictly nonlinear basis (φ(x) ≠ x). Using {valid}."
+        )
+    if not valid:
+        raise ValueError("polynomial_basis: no valid powers ≥ 2 provided")
+    return np.array([x ** int(p) for p in valid])
 
 
 def trigonometric_basis(x: np.ndarray, freqs: list[float]) -> np.ndarray:
@@ -222,6 +237,62 @@ class DSGEFeatureExtractor:
         self._check_fitted()
         phi = self.compute_basis(noisy_signal)
         return self.k0 + (self.K[:, np.newaxis] * phi).sum(axis=0)
+
+    # ──────────────────────────────────────────────────
+    #  DSGE channel formation for Hybrid UNet
+    # ──────────────────────────────────────────────────
+
+    def compute_dsge_channels_A(self, noisy_signal: np.ndarray) -> np.ndarray:
+        """Variant A: reconstruction + residual.
+
+        Returns [2, F, T'] — two STFT magnitude spectrograms:
+          channel 0: |STFT(x̂_dsge)| — optimal DSGE reconstruction
+          channel 1: |STFT(Z_dsge)| — residual (what DSGE couldn't explain)
+
+        where x̂ = k₀ + Σ kᵢ·φᵢ(x̃),  Z = x̃ - x̂.
+        """
+        self._check_fitted()
+        x_hat = self.reconstruct(noisy_signal)       # [T]
+        z_residual = noisy_signal - x_hat             # [T]
+
+        nperseg = self.stft_params.get('nperseg', 32)
+        noverlap = self.stft_params.get('noverlap', 16)
+        fs = self.stft_params.get('fs', 8192)
+
+        _, _, Zxx_hat = stft(x_hat, fs=fs, nperseg=nperseg, noverlap=noverlap)
+        _, _, Zxx_res = stft(z_residual, fs=fs, nperseg=nperseg, noverlap=noverlap)
+
+        return np.array([np.abs(Zxx_hat), np.abs(Zxx_res)])  # [2, F, T']
+
+    def compute_dsge_channels_B(self, noisy_signal: np.ndarray) -> np.ndarray:
+        """Variant B: reconstruction + weighted basis channels.
+
+        Returns [1+S, F, T'] — STFT magnitude spectrograms:
+          channel 0: |STFT(x̂_dsge)|         — optimal DSGE reconstruction
+          channels 1..S: |STFT(kᵢ·φᵢ(x̃))| — individually weighted basis components
+
+        Each basis contribution kᵢ·φᵢ(x̃) shows how much that nonlinear
+        component contributes to the reconstruction.
+        """
+        self._check_fitted()
+        x_hat = self.reconstruct(noisy_signal)    # [T]
+        phi = self.compute_basis(noisy_signal)    # [S, T]
+
+        nperseg = self.stft_params.get('nperseg', 32)
+        noverlap = self.stft_params.get('noverlap', 16)
+        fs = self.stft_params.get('fs', 8192)
+
+        # Channel 0: DSGE reconstruction
+        _, _, Zxx_hat = stft(x_hat, fs=fs, nperseg=nperseg, noverlap=noverlap)
+        mags = [np.abs(Zxx_hat)]
+
+        # Channels 1..S: weighted basis components
+        for i in range(self.S):
+            weighted = self.K[i] * phi[i]  # kᵢ·φᵢ(x̃)
+            _, _, Zxx_i = stft(weighted, fs=fs, nperseg=nperseg, noverlap=noverlap)
+            mags.append(np.abs(Zxx_i))
+
+        return np.array(mags)  # [1+S, F, T']
 
     # ──────────────────────────────────────────────────
     #  check_generating_element_norm

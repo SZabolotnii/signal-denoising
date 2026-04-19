@@ -99,6 +99,14 @@ class ResNetAutoencoderTrainer:
         spec = self._stft_batch(signal_batch.squeeze(1).to(self.device))
         return spec.abs().unsqueeze(1)
 
+    def _precompute_stft_mag(self, signals: np.ndarray, chunk_size: int = 50000) -> torch.Tensor:
+        """Precompute STFT magnitudes on CPU in chunks. [N, T] → [N, 1, F, T']."""
+        chunks = []
+        for i in range(0, len(signals), chunk_size):
+            x = torch.tensor(signals[i:i + chunk_size], dtype=torch.float32)
+            chunks.append(self._stft_batch(x).abs().unsqueeze(1))
+        return torch.cat(chunks)
+
     def load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
@@ -107,10 +115,18 @@ class ResNetAutoencoderTrainer:
             noisy, clean = noisy[:n], clean[:n]
         assert noisy.shape[1] == self.signal_len
 
-        X = torch.tensor(noisy[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)  # [N,1,T]
-        y = torch.tensor(clean[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
+        # Precompute STFT magnitudes on CPU (one-time cost)
+        print("  Precomputing STFT magnitudes on CPU …")
+        noisy_mag = self._precompute_stft_mag(noisy)
+        clean_mag = self._precompute_stft_mag(clean)
+        input_shape = (int(noisy_mag.shape[2]), int(noisy_mag.shape[3]))
+        print(f"  Done: {noisy_mag.shape} per set, "
+              f"{2 * noisy_mag.nelement() * 4 / 1e9:.1f} GB total")
 
-        dataset = TensorDataset(X, y)
+        noisy_raw = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)  # [N,1,T]
+        clean_raw = torch.tensor(clean, dtype=torch.float32).unsqueeze(1)
+
+        dataset = TensorDataset(noisy_mag, clean_mag, noisy_raw, clean_raw)
         total = len(dataset)
         val_len  = int(0.25 * total)
         test_len = int(0.25 * total)
@@ -120,16 +136,13 @@ class ResNetAutoencoderTrainer:
             generator=torch.Generator().manual_seed(self.random_state),
         )
 
-        example = self._signal_to_mag_tensor(X[:1])
-        _, _, freq_bins, time_frames = example.shape
-
         from train.device_utils import get_dataloader_kwargs
         dl_kw = get_dataloader_kwargs(self.device)
         return (
             DataLoader(train_set, batch_size=self.batch_size, shuffle=True, **dl_kw),
             DataLoader(val_set,   batch_size=self.batch_size, **dl_kw),
             DataLoader(test_set,  batch_size=self.batch_size, **dl_kw),
-            (freq_bins, time_frames),
+            input_shape,
         )
 
     # ── inference ─────────────────────────────────────────────────────────────
@@ -148,17 +161,18 @@ class ResNetAutoencoderTrainer:
         mag = spec.abs().unsqueeze(1)
         with torch.no_grad():
             out_mag = self.model(mag) * mag
-        out_spec = out_mag.squeeze(1) * torch.exp(1j * torch.angle(spec))
+        phase = spec / (spec.abs() + 1e-8)
+        out_spec = out_mag.squeeze(1) * phase
         return self._istft_batch(out_spec).unsqueeze(1)
 
     # ── validation ────────────────────────────────────────────────────────────
 
     def _compute_val_snr(self) -> float:
         all_true, all_pred = [], []
-        for X_batch, y_batch in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
-            pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+        for _nm, _cm, noisy_raw, clean_raw in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
+            pred = self.denoise_numpy(noisy_raw.squeeze(1).numpy())
             all_pred.append(pred)
-            all_true.append(y_batch.squeeze(1).numpy())
+            all_true.append(clean_raw.squeeze(1).numpy())
         return float(SignalToNoiseRatio.calculate(
             np.concatenate(all_true), np.concatenate(all_pred)
         ))
@@ -167,10 +181,10 @@ class ResNetAutoencoderTrainer:
         self.model.eval()
         total = 0.0
         with torch.no_grad():
-            for X_batch, y_batch in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
-                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
-                total += loss_fn(self.model(noisy_spec) * noisy_spec, clean_spec).item()
+            for noisy_mag, clean_mag, _, _ in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
+                nm = noisy_mag.to(self.device)
+                cm = clean_mag.to(self.device)
+                total += loss_fn(self.model(nm) * nm, cm).item()
         return total / len(self.val_loader)
 
     # ── training loop ─────────────────────────────────────────────────────────
@@ -195,11 +209,11 @@ class ResNetAutoencoderTrainer:
             reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
-            for X_batch, y_batch in pbar:
-                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
-                mask = self.model(noisy_spec)
-                loss = loss_fn(mask * noisy_spec, clean_spec)
+            for noisy_mag, clean_mag, _, _ in pbar:
+                nm = noisy_mag.to(self.device)
+                cm = clean_mag.to(self.device)
+                mask = self.model(nm)
+                loss = loss_fn(mask * nm, cm)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
@@ -281,10 +295,10 @@ class ResNetAutoencoderTrainer:
     def _evaluate_test(self) -> dict:
         all_true, all_pred = [], []
         with torch.no_grad():
-            for X_batch, y_batch in self.test_loader:
-                pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+            for _, _, noisy_raw, clean_raw in self.test_loader:
+                pred = self.denoise_numpy(noisy_raw.squeeze(1).numpy())
                 all_pred.append(pred)
-                all_true.append(y_batch.squeeze(1).numpy())
+                all_true.append(clean_raw.squeeze(1).numpy())
         y_true = np.concatenate(all_true)
         y_pred = np.concatenate(all_pred)
         metrics = {

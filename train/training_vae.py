@@ -124,6 +124,14 @@ class VAETrainer:
         logmag = recon_z * (self.spec_std + 1e-8) + self.spec_mean
         return torch.expm1(logmag).clamp_min(0.0)
 
+    def _precompute_stft_logmag(self, signals: np.ndarray, chunk_size: int = 50000) -> torch.Tensor:
+        """Precompute STFT log-magnitudes on CPU in chunks. [N, T] → [N, 1, F, T']."""
+        chunks = []
+        for i in range(0, len(signals), chunk_size):
+            x = torch.tensor(signals[i:i + chunk_size], dtype=torch.float32)
+            chunks.append(torch.log1p(self._stft_batch(x).abs()).unsqueeze(1))
+        return torch.cat(chunks)
+
     def load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
@@ -132,39 +140,47 @@ class VAETrainer:
             noisy, clean = noisy[:n], clean[:n]
         assert noisy.shape[1] == self.signal_len
 
-        X = torch.tensor(noisy[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
-        y = torch.tensor(clean[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
+        # Precompute STFT log-magnitudes on CPU (one-time cost)
+        print("  Precomputing STFT log-magnitudes on CPU …")
+        noisy_logmag = self._precompute_stft_logmag(noisy)  # [N,1,F,T']
+        clean_logmag = self._precompute_stft_logmag(clean)
+        freq_bins, time_frames = int(noisy_logmag.shape[2]), int(noisy_logmag.shape[3])
 
-        dataset = TensorDataset(X, y)
-        total = len(dataset)
+        # Estimate normalization stats from a small subset of train split.
+        # First split indices, then compute stats from train portion only.
+        total = len(noisy_logmag)
         val_len  = int(0.25 * total)
         test_len = int(0.25 * total)
         train_len = total - val_len - test_len
+        gen = torch.Generator().manual_seed(self.random_state)
+        indices = torch.randperm(total, generator=gen).tolist()
+        train_idx = indices[:train_len]
+
+        n_stats = min(2048, len(train_idx))
+        subset = noisy_logmag[train_idx[:n_stats]].squeeze(1)  # [B,F,T']
+        mean = float(subset.mean().item())
+        std = float(subset.std().item() + 1e-8)
+        norm_stats = {
+            "domain": "log1p_mag_zscore",
+            "mean": mean, "std": std,
+            "n_examples": int(n_stats),
+        }
+
+        # Apply z-score normalization to precomputed log-magnitudes
+        noisy_logmag_z = (noisy_logmag - mean) / (std + 1e-8)
+        clean_logmag_z = (clean_logmag - mean) / (std + 1e-8)
+        del noisy_logmag, clean_logmag  # free unnormalized copies
+
+        noisy_raw = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)
+        clean_raw = torch.tensor(clean, dtype=torch.float32).unsqueeze(1)
+        print(f"  Done: {noisy_logmag_z.shape} per set, "
+              f"{2 * noisy_logmag_z.nelement() * 4 / 1e9:.1f} GB total")
+
+        dataset = TensorDataset(noisy_logmag_z, clean_logmag_z, noisy_raw, clean_raw)
         train_set, val_set, test_set = random_split(
             dataset, [train_len, val_len, test_len],
             generator=torch.Generator().manual_seed(self.random_state),
         )
-
-        # Determine spectrogram shape
-        example = self._signal_to_logmag(X[:1])
-        _, _, freq_bins, time_frames = example.shape
-
-        # Estimate normalization stats from a small subset of TRAIN signals
-        # (fast, stable; avoids running STFT over the whole dataset).
-        train_idx = train_set.indices
-        n_stats = min(2048, len(train_idx))
-        # take deterministic prefix (train_idx is deterministic due to seed)
-        subset = X[train_idx[:n_stats]].to(self.device)
-        with torch.no_grad():
-            subset_log = self._signal_to_logmag(subset).squeeze(1)  # [B,F,T']
-            mean = float(subset_log.mean().item())
-            std = float(subset_log.std().item() + 1e-8)
-        norm_stats = {
-            "domain": "log1p_mag_zscore",
-            "mean": mean,
-            "std": std,
-            "n_examples": int(n_stats),
-        }
 
         from train.device_utils import get_dataloader_kwargs
         dl_kw = get_dataloader_kwargs(self.device)
@@ -193,17 +209,18 @@ class VAETrainer:
             recon_z, _, _ = self.model(logmag_z)
 
         out_mag = self._denorm_to_mag(recon_z).squeeze(1)
-        out_spec = out_mag * torch.exp(1j * torch.angle(spec))
+        phase = spec / (spec.abs() + 1e-8)
+        out_spec = out_mag * phase
         return self._istft_batch(out_spec).unsqueeze(1)
 
     # ── validation ────────────────────────────────────────────────────────────
 
     def _compute_val_snr(self) -> float:
         all_true, all_pred = [], []
-        for X_batch, y_batch in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
-            pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+        for _nz, _cz, noisy_raw, clean_raw in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
+            pred = self.denoise_numpy(noisy_raw.squeeze(1).numpy())
             all_pred.append(pred)
-            all_true.append(y_batch.squeeze(1).numpy())
+            all_true.append(clean_raw.squeeze(1).numpy())
         return float(SignalToNoiseRatio.calculate(
             np.concatenate(all_true), np.concatenate(all_pred)
         ))
@@ -212,9 +229,9 @@ class VAETrainer:
         self.model.eval()
         total = 0.0
         with torch.no_grad():
-            for X_batch, y_batch in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
-                noisy_z = self._signal_to_logmag_z(X_batch.to(self.device))
-                clean_z = self._signal_to_logmag_z(y_batch.to(self.device))
+            for noisy_z, clean_z, _, _ in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
+                noisy_z = noisy_z.to(self.device)
+                clean_z = clean_z.to(self.device)
                 recon_z, mu, logvar = self.model(noisy_z)
 
                 # KL per-sample (mean over batch)
@@ -246,9 +263,9 @@ class VAETrainer:
             reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
-            for X_batch, y_batch in pbar:
-                noisy_z = self._signal_to_logmag_z(X_batch.to(self.device))
-                clean_z = self._signal_to_logmag_z(y_batch.to(self.device))
+            for noisy_z, clean_z, _, _ in pbar:
+                noisy_z = noisy_z.to(self.device)
+                clean_z = clean_z.to(self.device)
                 recon_z, mu, logvar = self.model(noisy_z)
 
                 kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
@@ -350,10 +367,10 @@ class VAETrainer:
     def _evaluate_test(self) -> dict:
         all_true, all_pred = [], []
         with torch.no_grad():
-            for X_batch, y_batch in self.test_loader:
-                pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+            for _, _, noisy_raw, clean_raw in self.test_loader:
+                pred = self.denoise_numpy(noisy_raw.squeeze(1).numpy())
                 all_pred.append(pred)
-                all_true.append(y_batch.squeeze(1).numpy())
+                all_true.append(clean_raw.squeeze(1).numpy())
         y_true = np.concatenate(all_true)
         y_pred = np.concatenate(all_pred)
         metrics = {

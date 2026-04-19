@@ -40,8 +40,8 @@ def _p99(x: np.ndarray, eps: float = 1e-8) -> float:
     return v if v > eps else eps
 
 
-def _model_name(dsge_basis: str, dsge_order: int) -> str:
-    return f"HybridDSGE_UNet_{dsge_basis}_S{dsge_order}"
+def _model_name(dsge_basis: str, dsge_order: int, dsge_variant: str = 'A') -> str:
+    return f"HybridDSGE_UNet_{dsge_basis}_S{dsge_order}_v{dsge_variant}"
 
 
 class HybridUnetTrainer:
@@ -65,6 +65,7 @@ class HybridUnetTrainer:
         dsge_order: int = 3,
         dsge_basis: str = 'robust',
         dsge_powers: list | None = None,
+        dsge_variant: str = 'A',
         tikhonov_lambda: float = 0.01,
         batch_size: int = 1024,
         epochs: int = 30,
@@ -82,13 +83,23 @@ class HybridUnetTrainer:
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.dsge_order = dsge_order
+        self.dsge_variant = dsge_variant.upper()
+        assert self.dsge_variant in ('A', 'B'), f"dsge_variant must be 'A' or 'B', got {dsge_variant}"
         self.dsge_basis = dsge_basis
         # For robust basis: powers values are ignored — only len(powers) == dsge_order matters.
-        # For other bases: use provided powers or fall back to fractional defaults.
-        if dsge_basis == 'robust':
+        # For other bases: use provided powers or generate from dsge_order.
+        if dsge_powers is not None:
+            self.dsge_powers = dsge_powers
+        elif dsge_basis == 'robust':
             self.dsge_powers = list(range(dsge_order))
+        elif dsge_basis == 'fractional':
+            # Default fractional powers: sign(x)|x|^p with p from 0.5 step 0.5
+            self.dsge_powers = [0.5 * (i + 1) for i in range(dsge_order)]
+        elif dsge_basis == 'polynomial':
+            # Default polynomial powers: x^2, x^3, ... (no linear x^1)
+            self.dsge_powers = list(range(2, 2 + dsge_order))
         else:
-            self.dsge_powers = dsge_powers if dsge_powers is not None else [0.5, 1.5, 2.0]
+            self.dsge_powers = [0.5, 1.5, 2.0][:dsge_order]
         self.tikhonov_lambda = tikhonov_lambda
         self.batch_size = batch_size
         self.epochs = epochs
@@ -106,7 +117,7 @@ class HybridUnetTrainer:
         self.run_id = uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
-        self.model_name = _model_name(dsge_basis, dsge_order)
+        self.model_name = _model_name(dsge_basis, dsge_order, self.dsge_variant)
 
         if WANDB_OK and wandb_project:
             run_name = f"{self.model_name}_{noise_type}_{self.dataset_uid}_{self.run_id}"
@@ -122,25 +133,39 @@ class HybridUnetTrainer:
             reason = "wandb not installed" if not WANDB_OK else "no --wandb-project given"
             print(f"[W&B] Logging disabled ({reason})")
 
-        self.train_loader, self.val_loader, self.test_loader, self.input_shape, \
-            self.train_clean, self.train_noisy = self._load_data()
+        self._raw_noisy, self._raw_clean, self.input_shape, \
+            self._train_indices = self._load_raw_data()
 
-        print(f"[Info] Fitting DSGEFeatureExtractor on {len(self.train_clean)} train samples…")
+        train_clean = self._raw_clean[self._train_indices]
+        train_noisy = self._raw_noisy[self._train_indices]
+
+        print(f"[Info] Fitting DSGEFeatureExtractor on {len(train_clean)} train samples…")
         self.dsge = DSGEFeatureExtractor(
             basis_type=dsge_basis,
             powers=self.dsge_powers,
             tikhonov_lambda=tikhonov_lambda,
             stft_params={'nperseg': nperseg, 'noverlap': noverlap, 'fs': fs},
         )
-        self.dsge.fit(self.train_clean, self.train_noisy)
+        self.dsge.fit(train_clean, train_noisy)
         self.dsge.check_generating_element_norm()
         print(f"[Info] DSGE ready: {self.dsge}")
 
+        # Precompute DSGE channels (eliminates STFT+DSGE from training loop)
+        self.train_loader, self.val_loader, self.test_loader = self._precompute_and_build_loaders()
+
+        # Determine number of DSGE channels based on variant
+        # Use actual S from fitted DSGE (may differ from dsge_order if powers were overridden)
+        actual_S = self.dsge.S
+        # Variant A: 3 total = 1 (noisy) + 1 (reconstruction) + 1 (residual)
+        # Variant B: 2+S total = 1 (noisy) + 1 (reconstruction) + S (weighted basis)
+        dsge_channels = 2 if self.dsge_variant == 'A' else (1 + actual_S)
+
         self.model = HybridDSGE_UNet(
             input_shape=self.input_shape,
-            dsge_order=dsge_order,
+            dsge_order=dsge_channels,
         ).to(self.device)
-        print(f"[Info] Model params: {self.model.param_count():,}")
+        print(f"[Info] Model params: {self.model.param_count():,} "
+              f"(variant {self.dsge_variant}, {1 + dsge_channels} input channels)")
 
     # ── STFT helpers (GPU-batched, no scipy) ──────────────────────────────────
 
@@ -163,7 +188,8 @@ class HybridUnetTrainer:
 
     # ── data ──────────────────────────────────────────────────────────────────
 
-    def _load_data(self):
+    def _load_raw_data(self):
+        """Load raw signals, compute split indices, determine STFT shape."""
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
         if self.data_fraction < 1.0:
@@ -176,19 +202,76 @@ class HybridUnetTrainer:
         spec0 = self._stft_batch(dummy)
         input_shape = (int(spec0.shape[1]), int(spec0.shape[2]))
 
-        dataset = TensorDataset(
-            torch.tensor(noisy, dtype=torch.float32),
-            torch.tensor(clean, dtype=torch.float32),
-        )
-        total = len(dataset)
+        total = len(noisy)
         val_len  = int(0.25 * total)
         test_len = int(0.25 * total)
         train_len = total - val_len - test_len
         g = torch.Generator().manual_seed(self.random_state)
-        train_set, val_set, test_set = random_split(dataset, [train_len, val_len, test_len], generator=g)
+        indices = torch.randperm(total, generator=g).tolist()
+        train_indices = indices[:train_len]
 
-        train_clean = clean[train_set.indices]
-        train_noisy = noisy[train_set.indices]
+        return noisy, clean, input_shape, train_indices
+
+    def _precompute_and_build_loaders(self):
+        """Precompute DSGE channels + clean_mag for all samples after DSGE is fitted.
+
+        Channel formation depends on dsge_variant:
+          Variant A: [STFT(x̃), STFT(x̂_dsge), STFT(Z_dsge)]  — 3 channels
+          Variant B: [STFT(x̃), STFT(x̂_dsge), STFT(k₁·φ₁), ..., STFT(kₛ·φₛ)]  — 1+1+S channels
+        """
+        noisy, clean = self._raw_noisy, self._raw_clean
+        total = len(noisy)
+        val_len  = int(0.25 * total)
+        test_len = int(0.25 * total)
+        train_len = total - val_len - test_len
+
+        variant_desc = "reconstruction+residual" if self.dsge_variant == 'A' else "reconstruction+weighted_basis"
+        print(f"  Precomputing DSGE variant {self.dsge_variant} ({variant_desc}) on CPU …")
+
+        # Precompute clean magnitudes via batched STFT on CPU
+        clean_mag_list = []
+        for i in range(0, total, 50000):
+            x = torch.tensor(clean[i:i + 50000], dtype=torch.float32)
+            clean_mag_list.append(self._stft_batch(x).abs().unsqueeze(1))
+        all_clean_mag = torch.cat(clean_mag_list)  # [N, 1, F, T']
+
+        # Precompute DSGE channels per signal
+        all_channels = []
+        for i in tqdm(range(total), desc=f"  DSGE-v{self.dsge_variant}", unit="sig"):
+            s = noisy[i]
+            # Noisy STFT magnitude (always channel 0)
+            stft_mag = self._stft_batch(
+                torch.tensor(s[np.newaxis], dtype=torch.float32)
+            )[0].abs().numpy()  # [F, T']
+            stft_ref = _p99(stft_mag)
+
+            # DSGE channels (variant-dependent)
+            if self.dsge_variant == 'A':
+                dsge_ch = self.dsge.compute_dsge_channels_A(s)  # [2, F, T']
+            else:
+                dsge_ch = self.dsge.compute_dsge_channels_B(s)  # [1+S, F, T']
+
+            # Normalize DSGE channels to match noisy STFT scale
+            for j in range(dsge_ch.shape[0]):
+                ref = _p99(dsge_ch[j])
+                dsge_ch[j] *= (stft_ref / ref)
+
+            all_channels.append(
+                np.concatenate([stft_mag[np.newaxis], dsge_ch], axis=0)
+            )
+
+        all_x = torch.tensor(np.stack(all_channels), dtype=torch.float32)
+        noisy_raw = torch.tensor(noisy, dtype=torch.float32)
+        clean_raw = torch.tensor(clean, dtype=torch.float32)
+        n_ch = all_x.shape[1]
+        print(f"  Done: input={all_x.shape} ({n_ch}ch), clean_mag={all_clean_mag.shape}, "
+              f"{(all_x.nelement() + all_clean_mag.nelement()) * 4 / 1e9:.1f} GB")
+
+        dataset = TensorDataset(all_x, all_clean_mag, noisy_raw, clean_raw)
+        train_set, val_set, test_set = random_split(
+            dataset, [train_len, val_len, test_len],
+            generator=torch.Generator().manual_seed(self.random_state),
+        )
 
         from train.device_utils import get_dataloader_kwargs
         dl_kw = get_dataloader_kwargs(self.device)
@@ -196,18 +279,16 @@ class HybridUnetTrainer:
             DataLoader(train_set, batch_size=self.batch_size, shuffle=True, **dl_kw),
             DataLoader(val_set,   batch_size=self.batch_size, **dl_kw),
             DataLoader(test_set,  batch_size=self.batch_size, **dl_kw),
-            input_shape,
-            train_clean,
-            train_noisy,
         )
 
     # ── preprocessing ─────────────────────────────────────────────────────────
 
-    def _batch_to_4ch(self, signal_batch: np.ndarray) -> torch.Tensor:
-        """[N, T] → (B, 1+S, F, T') with per-signal DSGE normalisation.
+    def _batch_to_channels(self, signal_batch: np.ndarray) -> torch.Tensor:
+        """[N, T] → (B, C, F, T') with proper DSGE channel formation.
 
-        STFT is computed in one GPU-batched call; DSGE spectrograms are still
-        computed per-signal (CPU) since DSGEFeatureExtractor is not vectorised.
+        Channel layout depends on dsge_variant:
+          A: [STFT(x̃), STFT(x̂_dsge), STFT(Z_dsge)]
+          B: [STFT(x̃), STFT(x̂_dsge), STFT(k₁·φ₁), ..., STFT(kₛ·φₛ)]
         """
         x_t = torch.tensor(signal_batch, dtype=torch.float32, device=self.device)
         stft_mags = self._stft_batch(x_t).abs().cpu().numpy()  # [B, F, T']
@@ -217,18 +298,22 @@ class HybridUnetTrainer:
             stft_mag = stft_mags[i]                             # [F, T']
             stft_ref = _p99(stft_mag)
 
-            dsge_specs = self.dsge.compute_dsge_spectrograms(s)  # [S, F, T']
-            ch_scales = np.array([_p99(dsge_specs[j]) for j in range(dsge_specs.shape[0])], dtype=np.float32)
-            ch_scales = ch_scales[:, None, None]
-            dsge_norm = dsge_specs * (stft_ref / ch_scales)
+            if self.dsge_variant == 'A':
+                dsge_ch = self.dsge.compute_dsge_channels_A(s)  # [2, F, T']
+            else:
+                dsge_ch = self.dsge.compute_dsge_channels_B(s)  # [1+S, F, T']
+
+            for j in range(dsge_ch.shape[0]):
+                ref = _p99(dsge_ch[j])
+                dsge_ch[j] *= (stft_ref / ref)
 
             all_channels.append(
-                np.concatenate([stft_mag[np.newaxis], dsge_norm], axis=0)  # [1+S, F, T']
+                np.concatenate([stft_mag[np.newaxis], dsge_ch], axis=0)
             )
 
         return torch.tensor(
             np.stack(all_channels), dtype=torch.float32
-        ).to(self.device)  # [B, 1+S, F, T']
+        ).to(self.device)
 
     def _signal_to_clean_mag(self, signal_batch: np.ndarray) -> torch.Tensor:
         x_t = torch.tensor(signal_batch, dtype=torch.float32, device=self.device)
@@ -243,20 +328,21 @@ class HybridUnetTrainer:
     def _denoise_batch(self, signal_batch: np.ndarray) -> np.ndarray:
         x_t = torch.tensor(signal_batch, dtype=torch.float32, device=self.device)
         spec = self._stft_batch(x_t)                          # [B, F, T'] complex
-        x4 = self._batch_to_4ch(signal_batch)                 # [B, 1+S, F, T']
+        x_ch = self._batch_to_channels(signal_batch)          # [B, C, F, T']
         self.model.eval()
         with torch.no_grad():
-            out_mag = self.model(x4).squeeze(1) * x4[:, 0, :, :]  # [B, F, T']
-        out_spec = out_mag * torch.exp(1j * torch.angle(spec))
+            out_mag = self.model(x_ch).squeeze(1) * x_ch[:, 0, :, :]  # [B, F, T']
+        phase = spec / (spec.abs() + 1e-8)
+        out_spec = out_mag * phase
         return self._istft_batch(out_spec).cpu().numpy()
 
     # ── validation ────────────────────────────────────────────────────────────
 
     def _compute_val_snr(self) -> float:
         all_true, all_pred = [], []
-        for noisy, clean in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
-            all_pred.append(self.denoise_numpy(noisy.numpy()))
-            all_true.append(clean.numpy())
+        for _x4, _cm, noisy_raw, clean_raw in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
+            all_pred.append(self.denoise_numpy(noisy_raw.numpy()))
+            all_true.append(clean_raw.numpy())
         return float(SignalToNoiseRatio.calculate(
             np.concatenate(all_true), np.concatenate(all_pred)
         ))
@@ -266,9 +352,9 @@ class HybridUnetTrainer:
         total_loss = 0.0
         all_true, all_pred = [], []
         with torch.no_grad():
-            for noisy, clean in tqdm(loader, desc="  val loss", leave=False, unit="batch"):
-                x4 = self._batch_to_4ch(noisy.numpy())
-                clean_mag = self._signal_to_clean_mag(clean.numpy())
+            for x4, clean_mag, _, _ in tqdm(loader, desc="  val loss", leave=False, unit="batch"):
+                x4 = x4.to(self.device)
+                clean_mag = clean_mag.to(self.device)
                 out = self.model(x4) * x4[:, 0:1, :, :]
                 total_loss += loss_fn(out, clean_mag).item()
                 all_true.append(clean_mag.cpu().numpy())
@@ -303,9 +389,9 @@ class HybridUnetTrainer:
             reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
-            for noisy, clean in pbar:
-                x4 = self._batch_to_4ch(noisy.numpy())
-                clean_mag = self._signal_to_clean_mag(clean.numpy())
+            for x4, clean_mag, _, _ in pbar:
+                x4 = x4.to(self.device)
+                clean_mag = clean_mag.to(self.device)
                 out = self.model(x4) * x4[:, 0:1, :, :]
                 loss = loss_fn(out, clean_mag)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
@@ -398,9 +484,9 @@ class HybridUnetTrainer:
 
     def _evaluate_test(self) -> dict:
         all_true, all_pred = [], []
-        for noisy, clean in self.test_loader:
-            all_pred.append(self.denoise_numpy(noisy.numpy()))
-            all_true.append(clean.numpy())
+        for _, _, noisy_raw, clean_raw in self.test_loader:
+            all_pred.append(self.denoise_numpy(noisy_raw.numpy()))
+            all_true.append(clean_raw.numpy())
         y_true = np.concatenate(all_true)
         y_pred = np.concatenate(all_pred)
         metrics = {
@@ -432,10 +518,16 @@ if __name__ == '__main__':
                    help='Polynomial orders (number of basis functions) to sweep (default: 3 4 5)')
     p.add_argument('--dsge-basis',    type=str,   default='robust',
                    choices=['fractional', 'polynomial', 'trigonometric', 'robust'])
+    p.add_argument('--dsge-variant',  type=str,   default='A', choices=['A', 'B'],
+                   help='DSGE channel variant: A=reconstruction+residual, B=reconstruction+weighted_basis')
     p.add_argument('--lambda',        type=float, default=0.01, dest='tikhonov_lambda')
     p.add_argument('--nperseg',       type=int,   default=128)
     p.add_argument('--seed',          type=int,   default=42)
     p.add_argument('--wandb-project', default='')
+    p.add_argument('--partial-train', type=float, default=1.0,
+                   help='Fraction of dataset to use (0 < f <= 1)')
+    p.add_argument('--device',        default=None,
+                   choices=['cuda', 'mps', 'cpu', 'auto'])
     args = p.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -461,6 +553,7 @@ if __name__ == '__main__':
                 noise_type=args.noise_type,
                 dsge_order=order,
                 dsge_basis=args.dsge_basis,
+                dsge_variant=args.dsge_variant,
                 tikhonov_lambda=args.tikhonov_lambda,
                 batch_size=args.batch_size,
                 epochs=args.epochs,
@@ -471,6 +564,8 @@ if __name__ == '__main__':
                 noverlap=args.nperseg * 3 // 4,
                 random_state=args.seed,
                 wandb_project=args.wandb_project,
+                data_fraction=args.partial_train,
+                device=args.device,
             ).train()
             results.append(result)
         except Exception as exc:

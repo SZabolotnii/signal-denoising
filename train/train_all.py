@@ -16,10 +16,14 @@ Usage:
 import argparse
 import gc
 import json
+import os
 import sys
 import uuid as _uuid_mod
 from datetime import datetime
 from pathlib import Path
+
+# Allow MPS to fall back to CPU for unsupported ops (e.g. complex tensor operations).
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -36,9 +40,8 @@ except Exception:
 
 from train.device_utils import get_device, empty_cache, get_batch_size_multiplier
 
-# Transformer first — largest VRAM consumer (O(T²) attention), trains safely
-# before GPU memory gets fragmented by smaller models.
-ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
+# Spectral models first (fast with precomputed STFT), transformer last (slowest, O(T²) attention).
+ALL_MODELS = ["unet", "vae", "resnet", "hybrid", "wavelet", "transformer"]
 
 # Per-model batch sizes measured on ~8 GiB GPU with signal_len=1024, nperseg=128.
 # Values calibrated from actual vram= logs; target ≤ 6.5 GiB peak (fwd+bwd).
@@ -74,6 +77,9 @@ def _resolve_batch_size(args, model_key: str) -> int:
         return args.batch_size
     base = MODEL_BATCH_SIZES[model_key]
     mult = getattr(args, '_bs_mult', 1.0)
+    # Transformer has O(T²) memory in attention — don't scale batch with device multiplier.
+    if model_key == "transformer":
+        mult = 1.0
     return int(base * mult)
 
 
@@ -202,16 +208,20 @@ def run_wavelet(dataset_dir: Path, cfg: dict, args) -> dict | None:
 
 def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
     from train.training_hybrid import HybridUnetTrainer
+    dsge_variant = getattr(args, 'dsge_variant', 'A')
+    dsge_basis = getattr(args, 'dsge_basis', 'robust')
+    dsge_order = getattr(args, 'dsge_order', 3)
     print("\n" + "=" * 60)
-    print("=== HybridDSGE_UNet (robust basis S=3, U-Net mask, MSELoss) ===")
+    print(f"=== HybridDSGE_UNet ({dsge_basis} S={dsge_order} v{dsge_variant}, MSELoss) ===")
     print("=" * 60)
     bs = _resolve_batch_size(args, "hybrid")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["hybrid"]
     return HybridUnetTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
-        dsge_order=3,
-        dsge_basis='robust',
+        dsge_order=dsge_order,
+        dsge_basis=dsge_basis,
+        dsge_variant=dsge_variant,
         batch_size=bs,
         epochs=args.epochs,
         learning_rate=lr,

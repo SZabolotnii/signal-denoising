@@ -47,11 +47,11 @@ class SpectrogramVAE(nn.Module):
     def forward(self, x):
         # Encode
         h = self.encoder_conv(x)
-        h = h.view(h.size(0), -1)
+        h = h.reshape(h.size(0), -1)
         mu, logvar = self.fc_mu(h), self.fc_logvar(h)
         z = self.reparameterize(mu, logvar)
         # Decode
-        d = self.fc_dec(z).view(-1, 128, self._h_enc, self._w_enc)
+        d = self.fc_dec(z).reshape(-1, 128, self._h_enc, self._w_enc)
         out = self.decoder_deconv(d)
         # Ensure exact size
         if out.shape[-2:] != (self.freq_bins, self.time_frames):
