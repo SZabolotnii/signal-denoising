@@ -40,8 +40,10 @@ def _p99(x: np.ndarray, eps: float = 1e-8) -> float:
     return v if v > eps else eps
 
 
-def _model_name(dsge_basis: str, dsge_order: int, dsge_variant: str = 'A') -> str:
-    return f"HybridDSGE_UNet_{dsge_basis}_S{dsge_order}_v{dsge_variant}"
+def _model_name(dsge_basis: str, dsge_order: int, dsge_variant: str = 'A',
+                unet_width: int = 16) -> str:
+    width_tag = f"_w{unet_width}" if unet_width != 16 else ""
+    return f"HybridDSGE_UNet_{dsge_basis}_S{dsge_order}_v{dsge_variant}{width_tag}"
 
 
 class HybridUnetTrainer:
@@ -66,6 +68,7 @@ class HybridUnetTrainer:
         dsge_basis: str = 'robust',
         dsge_powers: list | None = None,
         dsge_variant: str = 'A',
+        unet_width: int = 16,
         tikhonov_lambda: float = 0.01,
         batch_size: int = 1024,
         epochs: int = 30,
@@ -83,6 +86,7 @@ class HybridUnetTrainer:
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.dsge_order = dsge_order
+        self.unet_width = unet_width
         self.dsge_variant = dsge_variant.upper()
         assert self.dsge_variant in ('A', 'B'), f"dsge_variant must be 'A' or 'B', got {dsge_variant}"
         self.dsge_basis = dsge_basis
@@ -117,7 +121,7 @@ class HybridUnetTrainer:
         self.run_id = uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
-        self.model_name = _model_name(dsge_basis, dsge_order, self.dsge_variant)
+        self.model_name = _model_name(dsge_basis, dsge_order, self.dsge_variant, unet_width)
 
         if WANDB_OK and wandb_project:
             run_name = f"{self.model_name}_{noise_type}_{self.dataset_uid}_{self.run_id}"
@@ -163,9 +167,11 @@ class HybridUnetTrainer:
         self.model = HybridDSGE_UNet(
             input_shape=self.input_shape,
             dsge_order=dsge_channels,
+            base_channels=self.unet_width,
         ).to(self.device)
         print(f"[Info] Model params: {self.model.param_count():,} "
-              f"(variant {self.dsge_variant}, {1 + dsge_channels} input channels)")
+              f"(variant {self.dsge_variant}, {1 + dsge_channels} in_ch, "
+              f"width={self.unet_width})")
 
     # ── STFT helpers (GPU-batched, no scipy) ──────────────────────────────────
 
@@ -521,6 +527,8 @@ if __name__ == '__main__':
     p.add_argument('--dsge-variant',  type=str,   default='A', choices=['A', 'B'],
                    help='DSGE channel variant: A=reconstruction+residual, B=reconstruction+weighted_basis')
     p.add_argument('--lambda',        type=float, default=0.01, dest='tikhonov_lambda')
+    p.add_argument('--unet-width',    type=int,   default=16,
+                   help='Base channel width for UNet encoder (16=~10k, 32=~40k, 64=~160k params)')
     p.add_argument('--nperseg',       type=int,   default=128)
     p.add_argument('--seed',          type=int,   default=42)
     p.add_argument('--wandb-project', default='')
@@ -554,6 +562,7 @@ if __name__ == '__main__':
                 dsge_order=order,
                 dsge_basis=args.dsge_basis,
                 dsge_variant=args.dsge_variant,
+                unet_width=args.unet_width,
                 tikhonov_lambda=args.tikhonov_lambda,
                 batch_size=args.batch_size,
                 epochs=args.epochs,

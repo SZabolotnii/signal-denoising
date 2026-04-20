@@ -28,29 +28,33 @@ class HybridDSGE_UNet(nn.Module):
         in_channels = 1 + dsge_order.
     """
 
-    def __init__(self, input_shape: tuple[int, int], dsge_order: int = 3):
+    def __init__(self, input_shape: tuple[int, int], dsge_order: int = 3,
+                 base_channels: int = 16):
         super().__init__()
         self.input_shape = input_shape
         self.dsge_order = dsge_order
+        self.base_channels = base_channels
         in_channels = 1 + dsge_order
+        c1 = base_channels       # encoder level 1
+        c2 = base_channels * 2   # encoder level 2
 
         # ── Encoder ──────────────────────────────────────
         self.enc1 = nn.Sequential(
-            nn.Conv2d(in_channels, 16, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels, c1, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
         )
         self.enc2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, stride=(1, 2), padding=1),
+            nn.Conv2d(c1, c2, kernel_size=3, stride=(1, 2), padding=1),
             nn.ReLU(inplace=True),
         )
 
         # ── Decoder ──────────────────────────────────────
         self.dec1 = nn.Sequential(
-            nn.ConvTranspose2d(32, 16, kernel_size=3, stride=(1, 2), padding=1, output_padding=(0, 1)),
+            nn.ConvTranspose2d(c2, c1, kernel_size=3, stride=(1, 2), padding=1, output_padding=(0, 1)),
             nn.ReLU(inplace=True),
         )
-        # Skip-connection: cat([dec1_out, enc1_out]) → 32 канали
-        self.final_conv = nn.Conv2d(32, 1, kernel_size=3, padding=1)
+        # Skip-connection: cat([dec1_out, enc1_out]) → 2*c1 channels
+        self.final_conv = nn.Conv2d(c1 * 2, 1, kernel_size=3, padding=1)
         self.sigmoid = nn.Sigmoid()
 
     @staticmethod
