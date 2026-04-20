@@ -6,6 +6,7 @@ Each config trains a HybridDSGE_UNet with corrected DSGE implementation.
 """
 import gc
 import json
+import multiprocessing as mp
 import os
 import sys
 from datetime import datetime
@@ -13,6 +14,12 @@ from pathlib import Path
 
 # Disable multiprocessing workers entirely to avoid fork errors on macOS
 os.environ["OMP_NUM_THREADS"] = "1"
+
+# Use spawn (macOS safe, deterministic across runs) instead of default fork.
+try:
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:

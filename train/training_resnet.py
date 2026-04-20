@@ -49,6 +49,8 @@ class ResNetAutoencoderTrainer:
         self.noverlap = int(nperseg * 0.75)
         self.pad = nperseg // 2
         self.random_state = random_state
+        from train.repro_utils import set_global_seed
+        set_global_seed(random_state)
         self.data_fraction = data_fraction
         self.output_dir = Path(output_dir) if output_dir is not None else None
         from train.device_utils import get_device

@@ -43,6 +43,8 @@ class TransformerTrainer:
         self.epochs = epochs
         self.lr = learning_rate
         self.random_state = random_state
+        from train.repro_utils import set_global_seed
+        set_global_seed(random_state)
         self.data_fraction = data_fraction
         self.output_dir = Path(output_dir) if output_dir is not None else None
         from train.device_utils import get_device
@@ -51,9 +53,6 @@ class TransformerTrainer:
         self.run_id = uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
-
-        np.random.seed(self.random_state)
-        torch.manual_seed(self.random_state)
 
         if WANDB_OK and wandb_project:
             run_name = f"{MODEL_NAME}_{noise_type}_{self.dataset_uid}_{self.run_id}"

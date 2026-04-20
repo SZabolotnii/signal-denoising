@@ -32,13 +32,19 @@ python train/train_all.py --dataset <path> --wandb-project signal-denoising
 # Train individual model
 python train/training_uae.py --dataset <path> --noise-type non_gaussian --epochs 30
 
-# DSGE basis sweep (13 combos)
+# DSGE basis sweep (13 combos via train/sweep_hybrid.py)
 python train/sweep_hybrid.py --dataset <path> --noise-types non_gaussian --epochs 30
+
+# Full DSGE ablation sweep (24 configs: Variant A/B × 3 bases × 2 orders × 2 noise types)
+python experiments/run_dsge_sweep.py --dataset <path> --epochs 30
 
 # Generate cross-evaluation report
 python train/compare_report.py --run <dataset>/weights/runs/run_YYYYMMDD_<uuid>
 
-# Evaluate dataset quality
+# Batch inference on a saved run
+python inference/inference_all_models.py --run <dataset>/weights/runs/run_YYYYMMDD_<uuid> --input <signals.npy>
+
+# Evaluate dataset quality (cumulant-based analysis)
 python data_generation/evaluate_dataset.py data_generation/datasets/<name>/
 ```
 
@@ -52,12 +58,16 @@ python data_generation/evaluate_dataset.py data_generation/datasets/<name>/
 | ResNet (`autoencoder_resnet.py`) | Spectral | Same STFT mask approach |
 | VAE (`autoencoder_vae.py`) | Spectral | Variational autoencoder with STFT |
 | Transformer (`time_series_trasformer.py`) | Time | Raw signal → self-attention → denoised signal |
-| Hybrid DSGE-UNet (`hybrid_unet.py`) | Spectral | 4-channel input: original STFT + 3 DSGE basis STFTs |
+| Hybrid DSGE-UNet (`hybrid_unet.py`) | Spectral | Multi-channel input: original STFT + DSGE basis STFTs; configurable `base_channels` |
 | Wavelet (`wavelet.py`) | Time-Freq | Classical grid search (CPU-only baseline) |
 
 **Spectral models** all follow: signal → STFT(nperseg=128, 75% overlap) → model predicts mask ∈ [0,1] → mask × noisy_spectrum → iSTFT. Uses `torch.stft`/`torch.istft` on GPU.
 
-**DSGE layer** (`dsge_layer.py`): Nonlinear basis expansion (fractional, polynomial, trigonometric, robust) that provides additional input channels to the Hybrid U-Net.
+**DSGE layer** (`dsge_layer.py`): Nonlinear basis expansion (fractional, polynomial, trigonometric, robust) fitted via Tikhonov-regularized least squares (`tikhonov_lambda=0.01`). Provides two channel strategies for the Hybrid U-Net:
+- **Variant A:** [reconstruction, residual] — 2 extra channels
+- **Variant B:** [reconstruction, weighted basis components] — outperforms A in experiments
+
+`dsge_layer.fit(clean, noisy)` is called once on training data; state serialized to `.npz` alongside `model_best.pth`.
 
 ### Training Pipeline (`train/`)
 
@@ -66,7 +76,7 @@ Each model has a `Trainer` class with a uniform interface:
 - `train() → dict`: training loop, returns results with metrics
 - `denoise_numpy(noisy: np.ndarray) → np.ndarray`: batch inference `[N, 1024] → [N, 1024]`
 
-**train_all.py** orchestrates: for each noise_type × model → train → save best weights (by val_loss) → evaluate per-SNR.
+**train_all.py** orchestrates: for each noise_type × model → train → save best weights (by val_SNR) → evaluate per-SNR.
 
 **Key training details:**
 - Loss: MSE for Gaussian, SmoothL1(β=0.02) for non-Gaussian (see `train/losses.py`)
@@ -93,7 +103,11 @@ Cross-evaluates all trained models on both Gaussian and non-Gaussian test sets. 
 - CSV/JSON data tables
 - Figures: SNR heatmap, per-model curves, DSGE scatter, example denoising
 
-Metrics in `metrics.py`: MSE, MAE, RMSE, SNR (dB).
+Metrics in `metrics.py`: MSE, MAE, RMSE, SNR (dB). SNR = 10·log₁₀(Σclean² / Σnoise²).
+
+### Inference (`inference/`)
+
+Per-model inference wrappers (`inference_uae.py`, `inference_resnet.py`, etc.) and a unified `inference_all_models.py`. `inference_hybrid.py` handles DSGE state loading from `.npz` before inference.
 
 ### Data Generation (`data_generation/generation.py`)
 
@@ -116,11 +130,24 @@ Generates synthetic QPSK/BPSK signals with configurable noise. Output per datase
 
 ## Key Dependencies
 
-PyTorch 2.6, NumPy, SciPy (STFT), PyWavelets, matplotlib, wandb (optional). See `requirements.txt`.
+PyTorch 2.6, NumPy, SciPy (STFT), PyWavelets, matplotlib, wandb (optional). Use `requirements-cuda.txt` for NVIDIA GPU setups (pins CUDA 12.4 packages).
 
 ## Environment Setup
 
 ```bash
-pip install -r requirements.txt
-cp .env.template .env  # Add WANDB_API_KEY if using W&B
+pip install -r requirements.txt          # CPU / MPS
+pip install -r requirements-cuda.txt     # NVIDIA GPU
+
+# Create .env manually (.env.template was removed):
+echo "WANDB_API_KEY=your_key_here" > .env
 ```
+
+## Experiments
+
+`experiments/` contains reproducibility bash scripts (`dsge_*.sh`, `fpv_experiment.sh`) and `run_dsge_sweep.py` for systematic DSGE ablations. Research findings are tracked in `experiments/RESEARCH_STATUS_*.md`.
+
+There is no formal test suite (`tests/` is empty); correctness is validated through the experiment pipeline and compare_report outputs.
+
+## Device Support
+
+`train/device_utils.py` auto-detects CUDA → MPS (Apple Silicon) → CPU. MPS fallback is active on M-series Macs with PyTorch 2.6.
