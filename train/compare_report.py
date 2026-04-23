@@ -81,64 +81,84 @@ def _device():
     return str(get_device())
 
 
+def _torch_stft_helpers(nperseg: int, noverlap: int, signal_len: int, device):
+    """Torch-based STFT/iSTFT matching trainer conventions.
+
+    Mirrors training_uae.py._stft_batch / _istft_batch exactly (Hann window,
+    center=True, pad_mode='reflect'). scipy STFT was used historically but
+    produced systematically lower output SNR (~8 dB offset vs trainer's own
+    denoise_numpy) because of boundary/COLA mismatch.
+    """
+    import torch
+    hop = nperseg - noverlap
+
+    def stft(noisy_np):  # [N, T] → (complex [N, F, T'], mag [N, F, T'])
+        x = torch.tensor(noisy_np, dtype=torch.float32, device=device)
+        win = torch.hann_window(nperseg, device=device)
+        spec = torch.stft(
+            x, n_fft=nperseg, hop_length=hop, win_length=nperseg, window=win,
+            center=True, pad_mode='reflect', onesided=True, return_complex=True,
+        )
+        return spec, spec.abs()
+
+    def istft(spec):  # complex [N, F, T'] → [N, signal_len]
+        win = torch.hann_window(nperseg, device=device)
+        return torch.istft(
+            spec, n_fft=nperseg, hop_length=hop, win_length=nperseg, window=win,
+            center=True, onesided=True, length=signal_len,
+        )
+
+    return stft, istft
+
+
 def _load_unet(run_dir: Path, cfg: dict, nperseg: int = 128):
     import torch
     from models.autoencoder_unet import UnetAutoencoder
-    from train.training_uae import stft_mag_phase, istft_from_mag_phase
     device = _device()
     fs = cfg['sample_rate']; signal_len = cfg['block_size']
-    noverlap = nperseg * 3 // 4; pad = nperseg // 2
-    dummy_mag, _ = stft_mag_phase(np.zeros(signal_len), fs, nperseg, noverlap, pad)
-    model = UnetAutoencoder(dummy_mag.shape).to(device)
+    noverlap = nperseg * 3 // 4
+    stft, istft = _torch_stft_helpers(nperseg, noverlap, signal_len, device)
+
+    dummy_spec, _ = stft(np.zeros((1, signal_len), dtype=np.float32))
+    freq_bins, time_frames = dummy_spec.shape[-2], dummy_spec.shape[-1]
+    model = UnetAutoencoder((freq_bins, time_frames)).to(device)
     model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
+
     def denoise(noisy):
-        mags, phases = [], []
-        for x in noisy:
-            m, p = stft_mag_phase(x, fs, nperseg, noverlap, pad)
-            mags.append(m); phases.append(p)
-        mags_np = np.stack(mags)
-        t = torch.tensor(mags_np, dtype=torch.float32, device=device).unsqueeze(1)
+        spec, mag = stft(noisy)                        # [N, F, T']
+        mag_in = mag.unsqueeze(1)                      # [N, 1, F, T']
         with torch.no_grad():
-            masks = model(t).squeeze(1).cpu().numpy()
-        return np.stack([
-            istft_from_mag_phase(m * mk, p, fs, nperseg, noverlap, pad, signal_len)
-            for m, mk, p in zip(mags_np, masks, phases)
-        ])
+            out_mag = (model(mag_in) * mag_in).squeeze(1)
+        phase = spec / (spec.abs() + 1e-8)
+        rec = istft(out_mag * phase).cpu().numpy()
+        return rec
     return denoise
 
 
 def _load_resnet(run_dir: Path, cfg: dict, nperseg: int = 128):
-    import torch; import torch.nn as nn
-    from scipy.signal import stft as _stft, istft as _istft
+    import torch
     from models.autoencoder_resnet import ResNetAutoencoder
     device = _device()
     fs = cfg['sample_rate']; signal_len = cfg['block_size']
-    noverlap = int(nperseg * 0.75); pad = nperseg // 2
-    dummy = torch.zeros(1, 1, signal_len)
-    padded = nn.functional.pad(dummy, (pad, pad), mode='reflect')
-    _, _, Zxx = _stft(padded[0, 0].numpy(), fs=fs, nperseg=nperseg, noverlap=noverlap)
-    freq_bins, time_frames = np.abs(Zxx).shape
+    noverlap = int(nperseg * 0.75)
+    stft, istft = _torch_stft_helpers(nperseg, noverlap, signal_len, device)
+
+    dummy_spec, _ = stft(np.zeros((1, signal_len), dtype=np.float32))
+    freq_bins, time_frames = dummy_spec.shape[-2], dummy_spec.shape[-1]
     model = ResNetAutoencoder((freq_bins, time_frames)).to(device)
     model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
+
     def denoise(noisy):
-        t = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)
-        padded = nn.functional.pad(t, (pad, pad), mode='reflect')
-        mags, phases = [], []
-        for s in padded.squeeze(1).numpy():
-            _, _, Zxx = _stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)
-            mags.append(np.abs(Zxx)); phases.append(np.angle(Zxx))
-        spec = torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(device)
+        spec, mag = stft(noisy)
+        mag_in = mag.unsqueeze(1)
         with torch.no_grad():
-            out_mag = model(spec).squeeze(1).cpu().numpy()
-        rec = []
-        for mag, phase in zip(out_mag, phases):
-            _, r = _istft(mag * np.exp(1j * phase), fs=fs, nperseg=nperseg, noverlap=noverlap)
-            r = r[pad: pad + signal_len]
-            if len(r) < signal_len: r = np.pad(r, (0, signal_len - len(r)))
-            rec.append(r.astype(np.float32))
-        return np.stack(rec)
+            # Mask-style output; multiply by input mag (training_resnet.py:165).
+            out_mag = (model(mag_in) * mag_in).squeeze(1)
+        phase = spec / (spec.abs() + 1e-8)
+        rec = istft(out_mag * phase).cpu().numpy()
+        return rec
     return denoise
 
 
@@ -220,17 +240,37 @@ def _load_transformer(run_dir: Path, cfg: dict):
     return denoise
 
 
-def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int, nperseg: int = 128):
+def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int,
+                 dsge_variant: str = 'A', unet_width: int = 16,
+                 mask_type: str = 'ratio', dsge_norm_method: str = 'p99',
+                 nperseg: int = 128):
+    """Load HybridDSGE_UNet with correct variant-dependent channel layout.
+
+    Channel count per variant (must match saved weights):
+      A: 1 + 2       = [noisy, DSGE_reconstruction, DSGE_residual]
+      B: 1 + (1+S)   = [noisy, DSGE_reconstruction, k₁·φ₁, …, kₛ·φₛ]
+
+    Mirrors training_hybrid.py: torch STFT for channel 0 + iSTFT, scipy for
+    DSGE channels (from dsge.compute_dsge_channels_*).
+    """
     import torch
-    from scipy.signal import stft as _stft, istft as _istft
     from models.hybrid_unet import HybridDSGE_UNet
     from models.dsge_layer import DSGEFeatureExtractor
     device = _device()
     fs = cfg['sample_rate']; signal_len = cfg['block_size']
     noverlap = nperseg * 3 // 4
-    _, _, Zxx = _stft(np.zeros(signal_len), fs=fs, nperseg=nperseg, noverlap=noverlap)
-    input_shape = np.abs(Zxx).shape
-    model = HybridDSGE_UNet(input_shape=input_shape, dsge_order=dsge_order).to(device)
+    stft, istft = _torch_stft_helpers(nperseg, noverlap, signal_len, device)
+
+    dummy_spec, _ = stft(np.zeros((1, signal_len), dtype=np.float32))
+    input_shape = (dummy_spec.shape[-2], dummy_spec.shape[-1])
+
+    dsge_variant = dsge_variant.upper()
+    assert dsge_variant in ('A', 'B'), f"dsge_variant must be 'A' or 'B', got {dsge_variant!r}"
+    dsge_channels = 2 if dsge_variant == 'A' else (1 + dsge_order)
+    model = HybridDSGE_UNet(
+        input_shape=input_shape, dsge_order=dsge_channels,
+        base_channels=unet_width, mask_type=mask_type,
+    ).to(device)
     model.load_state_dict(torch.load(run_dir / 'model_best.pth', map_location=device))
     model.eval()
     dsge = DSGEFeatureExtractor.load_state(
@@ -238,36 +278,50 @@ def _load_hybrid(run_dir: Path, cfg: dict, dsge_basis: str, dsge_order: int, npe
         stft_params={'nperseg': nperseg, 'noverlap': noverlap, 'fs': fs},
     )
 
-    def _p99(x, eps: float = 1e-8):
-        v = float(np.percentile(x, 99))
+    def _scale(x, eps: float = 1e-8) -> float:
+        if dsge_norm_method == 'p99':
+            v = float(np.percentile(x, 99))
+        elif dsge_norm_method == 'mad':
+            v = float(np.median(np.abs(x))) * 1.4826
+        else:
+            raise ValueError(f"Unknown dsge_norm_method: {dsge_norm_method!r}")
         return v if v > eps else eps
 
     def denoise(noisy):
-        phases = [np.angle(_stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)[2]) for s in noisy]
-        stft_mags, dsge_list = [], [[] for _ in range(dsge_order)]
-        for s in noisy:
-            _, _, Zxx = _stft(s, fs=fs, nperseg=nperseg, noverlap=noverlap)
-            stft_mags.append(np.abs(Zxx))
-            for i, spec in enumerate(dsge.compute_dsge_spectrograms(s)):
-                dsge_list[i].append(spec)
-        stft_stack = np.stack(stft_mags)
-        # Keep preprocessing consistent with training_hybrid.py:
-        # use robust p99 scale instead of max (max is unstable under impulsive noise).
-        ref_scale = _p99(stft_stack)
-        channels = [stft_stack]
-        for i in range(dsge_order):
-            ch = np.stack(dsge_list[i])
-            ch_scale = _p99(ch)
-            channels.append(ch * (ref_scale / ch_scale))
-        x4 = torch.tensor(np.stack(channels, axis=1), dtype=torch.float32).to(device)
+        spec, mag = stft(noisy)                    # torch: [N, F, T']
+        mag_np = mag.cpu().numpy()                 # used for DSGE norm reference
+
+        all_channels = []
+        for i, s in enumerate(noisy):
+            stft_mag = mag_np[i]                   # [F, T']
+            stft_ref = _scale(stft_mag)
+            if dsge_variant == 'A':
+                dsge_ch = dsge.compute_dsge_channels_A(s)
+            else:
+                dsge_ch = dsge.compute_dsge_channels_B(s)
+            for j in range(dsge_ch.shape[0]):
+                ref = _scale(dsge_ch[j])
+                dsge_ch[j] *= (stft_ref / ref)
+            # Shape-match DSGE channels to torch STFT grid (scipy and torch
+            # may produce slightly different T' under center=True + reflect).
+            target_T = stft_mag.shape[-1]
+            if dsge_ch.shape[-1] != target_T:
+                dsge_ch = dsge_ch[..., :target_T]
+                if dsge_ch.shape[-1] < target_T:
+                    pad_w = target_T - dsge_ch.shape[-1]
+                    dsge_ch = np.pad(dsge_ch, [(0, 0)] * (dsge_ch.ndim - 1) + [(0, pad_w)])
+            all_channels.append(np.concatenate([stft_mag[np.newaxis], dsge_ch], axis=0))
+
+        x_ch = torch.tensor(np.stack(all_channels), dtype=torch.float32).to(device)
         with torch.no_grad():
-            out_mag = model(x4).squeeze(1).cpu().numpy() * x4[:, 0].cpu().numpy()
-        rec = []
-        for mag, phase in zip(out_mag, phases):
-            _, r = _istft(mag * np.exp(1j * phase), fs=fs, nperseg=nperseg, noverlap=noverlap)
-            r = r[:signal_len] if len(r) >= signal_len else np.pad(r, (0, signal_len - len(r)))
-            rec.append(r.astype(np.float32))
-        return np.stack(rec)
+            raw = model(x_ch)
+            if mask_type == 'ratio':
+                out_mag = (raw * x_ch[:, 0:1, :, :]).squeeze(1)
+            else:
+                out_mag = torch.clamp(x_ch[:, 0:1, :, :] + raw, min=0.0).squeeze(1)
+        phase = spec / (spec.abs() + 1e-8)
+        rec = istft(out_mag * phase).cpu().numpy()
+        return rec
     return denoise
 
 
@@ -326,13 +380,25 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                 fn = _load_wavelet(model_dir)
                 mc = 'Wavelet'; is_hybrid = False
             elif model_part.startswith('HybridDSGE_UNet_'):
-                m = re.match(r'HybridDSGE_UNet_(\w+)_S(\d+)$', model_part)
+                # _model_name: HybridDSGE_UNet_<basis>_S<order>_v<A|B>[_w<width>]
+                m = re.match(r'HybridDSGE_UNet_(.+?)_S(\d+)_v([AB])(?:_w(\d+))?$', model_part)
                 if not m:
-                    print(f"  [skip] Cannot parse hybrid config from: {model_part}")
-                    continue
-                basis, order = m.group(1), int(m.group(2))
-                fn = _load_hybrid(model_dir, cfg, basis, order, nperseg)
+                    # Back-compat: older runs may have the pre-variant naming
+                    m2 = re.match(r'HybridDSGE_UNet_(\w+)_S(\d+)$', model_part)
+                    if not m2:
+                        print(f"  [skip] Cannot parse hybrid config from: {model_part}")
+                        continue
+                    basis, order = m2.group(1), int(m2.group(2))
+                    variant, width = 'A', 16
+                else:
+                    basis, order = m.group(1), int(m.group(2))
+                    variant = m.group(3)
+                    width = int(m.group(4)) if m.group(4) else 16
+                fn = _load_hybrid(model_dir, cfg, basis, order,
+                                  dsge_variant=variant, unet_width=width,
+                                  nperseg=nperseg)
                 mc = model_part; is_hybrid = True
+                dsge_variant = variant
             else:
                 print(f"  [skip] Unknown model: {model_part}")
                 continue

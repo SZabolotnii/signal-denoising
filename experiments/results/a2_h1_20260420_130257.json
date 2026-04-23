@@ -1,0 +1,10 @@
+[
+  {
+    "scenario": "fpv",
+    "loss": "mse",
+    "seed": 42,
+    "epochs": 2,
+    "best_val_snr_db": 1.3162550926208496,
+    "final_test_snr_db": 1.3063609600067139
+  }
+]

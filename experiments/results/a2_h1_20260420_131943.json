@@ -1,0 +1,290 @@
+[
+  {
+    "scenario": "fpv",
+    "loss": "mse",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 5.55450439453125,
+    "final_test_snr_db": 5.4663286209106445
+  },
+  {
+    "scenario": "fpv",
+    "loss": "mse",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 7.578703880310059,
+    "final_test_snr_db": 7.489337921142578
+  },
+  {
+    "scenario": "fpv",
+    "loss": "mse",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 6.095373153686523,
+    "final_test_snr_db": 6.0544328689575195
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b0.02",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 0.0017759320326149464,
+    "final_test_snr_db": 0.0016274047084152699
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b0.02",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 8.235734939575195,
+    "final_test_snr_db": 8.220948219299316
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b0.02",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 0.002012944081798196,
+    "final_test_snr_db": 0.0021857786923646927
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b0.1",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 0.0017867996357381344,
+    "final_test_snr_db": 0.001638790243305266
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b0.1",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 8.239673614501953,
+    "final_test_snr_db": 8.224761962890625
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b0.1",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 0.0020564119331538677,
+    "final_test_snr_db": 0.0022375243715941906
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b1.0",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 0.0024362215772271156,
+    "final_test_snr_db": 0.002188366139307618
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b1.0",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 8.49952220916748,
+    "final_test_snr_db": 8.473499298095703
+  },
+  {
+    "scenario": "fpv",
+    "loss": "smoothl1_b1.0",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 0.003438366111367941,
+    "final_test_snr_db": 0.0037704661954194307
+  },
+  {
+    "scenario": "fpv",
+    "loss": "huber_d1.0",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 0.0024362215772271156,
+    "final_test_snr_db": 0.002188366139307618
+  },
+  {
+    "scenario": "fpv",
+    "loss": "huber_d1.0",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 8.49952220916748,
+    "final_test_snr_db": 8.473499298095703
+  },
+  {
+    "scenario": "fpv",
+    "loss": "huber_d1.0",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 0.003438366111367941,
+    "final_test_snr_db": 0.0037704661954194307
+  },
+  {
+    "scenario": "fpv",
+    "loss": "charbonnier_e1e-3",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 0.0017743795178830624,
+    "final_test_snr_db": 0.0016263696597889066
+  },
+  {
+    "scenario": "fpv",
+    "loss": "charbonnier_e1e-3",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 8.235711097717285,
+    "final_test_snr_db": 8.220927238464355
+  },
+  {
+    "scenario": "fpv",
+    "loss": "charbonnier_e1e-3",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 0.002009321702644229,
+    "final_test_snr_db": 0.002181121613830328
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "mse",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -0.014417799189686775,
+    "final_test_snr_db": -0.014247165992856026
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "mse",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.012218263000249863,
+    "final_test_snr_db": -0.01271410658955574
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "mse",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.007699094712734222,
+    "final_test_snr_db": -0.007752514909952879
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b0.02",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -0.0004553580656647682,
+    "final_test_snr_db": -0.0004864245711360127
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b0.02",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.0008312780410051346,
+    "final_test_snr_db": -0.0008859081426635385
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b0.02",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.0003740683605428785,
+    "final_test_snr_db": -0.00034300261177122593
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b0.1",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -0.0005004046251997352,
+    "final_test_snr_db": -0.0005317303584888577
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b0.1",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.0008830601582303643,
+    "final_test_snr_db": -0.0009436460677534342
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b0.1",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.00041134748607873917,
+    "final_test_snr_db": -0.0003792460192926228
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b1.0",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -0.001343689626082778,
+    "final_test_snr_db": -0.0013996209017932415
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b1.0",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.0016474365256726742,
+    "final_test_snr_db": -0.0017336703604087234
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "smoothl1_b1.0",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.0012144806096330285,
+    "final_test_snr_db": -0.0011590694775804877
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "huber_d1.0",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -0.001343689626082778,
+    "final_test_snr_db": -0.0013996209017932415
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "huber_d1.0",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.0016474365256726742,
+    "final_test_snr_db": -0.0017336703604087234
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "huber_d1.0",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.0012144806096330285,
+    "final_test_snr_db": -0.0011590694775804877
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "charbonnier_e1e-3",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -0.00044577926746569574,
+    "final_test_snr_db": -0.00047969346633180976
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "charbonnier_e1e-3",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.0008222161559388041,
+    "final_test_snr_db": -0.0008755517192184925
+  },
+  {
+    "scenario": "deep_space",
+    "loss": "charbonnier_e1e-3",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.00036811409518122673,
+    "final_test_snr_db": -0.00033756616176106036
+  }
+]

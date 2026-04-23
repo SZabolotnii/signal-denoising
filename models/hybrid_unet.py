@@ -29,11 +29,13 @@ class HybridDSGE_UNet(nn.Module):
     """
 
     def __init__(self, input_shape: tuple[int, int], dsge_order: int = 3,
-                 base_channels: int = 16):
+                 base_channels: int = 16, mask_type: str = "ratio"):
         super().__init__()
         self.input_shape = input_shape
         self.dsge_order = dsge_order
         self.base_channels = base_channels
+        assert mask_type in ("ratio", "additive"), f"mask_type must be 'ratio' or 'additive', got {mask_type!r}"
+        self.mask_type = mask_type
         in_channels = 1 + dsge_order
         c1 = base_channels       # encoder level 1
         c2 = base_channels * 2   # encoder level 2
@@ -88,7 +90,10 @@ class HybridDSGE_UNet(nn.Module):
         w = min(d1.shape[3], e1.shape[3])
         d1 = torch.cat([d1[..., :h, :w], e1[..., :h, :w]], dim=1)  # (B, 32, h, w)
 
-        out = self.sigmoid(self.final_conv(d1))  # (B, 1, F, T')
+        raw = self.final_conv(d1)  # (B, 1, F, T')
+        # ratio:   sigmoid → [0, 1] multiplicative mask on noisy_mag
+        # additive: raw linear → unconstrained residual correction on noisy_mag
+        out = self.sigmoid(raw) if self.mask_type == "ratio" else raw
 
         if out.shape[-2:] != self.input_shape:
             out = F.interpolate(out, size=self.input_shape, mode='bilinear', align_corners=False)

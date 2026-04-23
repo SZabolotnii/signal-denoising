@@ -1,0 +1,170 @@
+[
+  {
+    "scenario": "fpv",
+    "mask_type": "ratio",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 0.0017759320326149464,
+    "final_test_snr_db": 0.0016274047084152699,
+    "final_mask_stats": {
+      "min": 6.905265372412253e-17,
+      "max": 0.5067898035049438,
+      "mean": 0.1384128951048951,
+      "std": 0.12473362228880938
+    }
+  },
+  {
+    "scenario": "fpv",
+    "mask_type": "ratio",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 8.235734939575195,
+    "final_test_snr_db": 8.220948219299316,
+    "final_mask_stats": {
+      "min": 2.31938610539828e-08,
+      "max": 0.9983682036399841,
+      "mean": 0.30100766433566434,
+      "std": 0.1564039030298889
+    }
+  },
+  {
+    "scenario": "fpv",
+    "mask_type": "ratio",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 0.002012944081798196,
+    "final_test_snr_db": 0.0021857786923646927,
+    "final_mask_stats": {
+      "min": 1.970053878706306e-18,
+      "max": 0.5132158398628235,
+      "mean": 0.1054452867132867,
+      "std": 0.11115069945861449
+    }
+  },
+  {
+    "scenario": "fpv",
+    "mask_type": "additive",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": 2.219141960144043,
+    "final_test_snr_db": 2.2216882705688477,
+    "final_mask_stats": {
+      "min": -38.047149658203125,
+      "max": -0.008779048919677734,
+      "mean": -3.509735832167832,
+      "std": 3.588186280653162
+    }
+  },
+  {
+    "scenario": "fpv",
+    "mask_type": "additive",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": 2.019535779953003,
+    "final_test_snr_db": 2.0159382820129395,
+    "final_mask_stats": {
+      "min": -57.124446868896484,
+      "max": -0.07594485580921173,
+      "mean": -5.404162386946387,
+      "std": 4.893737644269987
+    }
+  },
+  {
+    "scenario": "fpv",
+    "mask_type": "additive",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": 1.6537072658538818,
+    "final_test_snr_db": 1.643068790435791,
+    "final_mask_stats": {
+      "min": -45.45550537109375,
+      "max": -0.011545225977897644,
+      "mean": -4.569805277389277,
+      "std": 4.471019343933926
+    }
+  },
+  {
+    "scenario": "deep_space",
+    "mask_type": "ratio",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -0.0004553580656647682,
+    "final_test_snr_db": -0.0004864245711360127,
+    "final_mask_stats": {
+      "min": 0.0,
+      "max": 0.5164694786071777,
+      "mean": 0.014732769522144522,
+      "std": 0.038060124168756586
+    }
+  },
+  {
+    "scenario": "deep_space",
+    "mask_type": "ratio",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.0008312780410051346,
+    "final_test_snr_db": -0.0008859081426635385,
+    "final_mask_stats": {
+      "min": 0.0,
+      "max": 0.9703659415245056,
+      "mean": 0.010949095279720279,
+      "std": 0.030970151933875874
+    }
+  },
+  {
+    "scenario": "deep_space",
+    "mask_type": "ratio",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.0003740683605428785,
+    "final_test_snr_db": -0.00034300261177122593,
+    "final_mask_stats": {
+      "min": 0.0,
+      "max": 0.5447050929069519,
+      "mean": 0.013493034673659674,
+      "std": 0.03607056791963269
+    }
+  },
+  {
+    "scenario": "deep_space",
+    "mask_type": "additive",
+    "seed": 42,
+    "epochs": 8,
+    "best_val_snr_db": -1.8492000102996826,
+    "final_test_snr_db": -1.8578516244888306,
+    "final_mask_stats": {
+      "min": -332.4419250488281,
+      "max": -0.22288329899311066,
+      "mean": -23.594072913752914,
+      "std": 19.303778430887814
+    }
+  },
+  {
+    "scenario": "deep_space",
+    "mask_type": "additive",
+    "seed": 43,
+    "epochs": 8,
+    "best_val_snr_db": -0.5253053307533264,
+    "final_test_snr_db": -0.5257666110992432,
+    "final_mask_stats": {
+      "min": -501.528076171875,
+      "max": -0.5739660263061523,
+      "mean": -41.84430097902098,
+      "std": 33.04697258835407
+    }
+  },
+  {
+    "scenario": "deep_space",
+    "mask_type": "additive",
+    "seed": 44,
+    "epochs": 8,
+    "best_val_snr_db": -0.5926417112350464,
+    "final_test_snr_db": -0.5772953033447266,
+    "final_mask_stats": {
+      "min": -365.2103271484375,
+      "max": -0.11560457944869995,
+      "mean": -30.69593361305361,
+      "std": 24.265810620656193
+    }
+  }
+]

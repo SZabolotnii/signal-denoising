@@ -40,6 +40,21 @@ def _p99(x: np.ndarray, eps: float = 1e-8) -> float:
     return v if v > eps else eps
 
 
+def _robust_scale(x: np.ndarray, method: str = 'p99', eps: float = 1e-8) -> float:
+    """Per-channel scale reference. method ∈ {'p99', 'mad'}.
+
+    'p99' — 99th percentile (current default, sensitive to top-1% tail).
+    'mad' — median(|x|) × 1.4826 (std-equivalent under Gaussian, robust to heavy tails).
+    """
+    if method == 'p99':
+        v = float(np.percentile(x, 99))
+    elif method == 'mad':
+        v = float(np.median(np.abs(x))) * 1.4826
+    else:
+        raise ValueError(f"Unknown dsge_norm_method: {method!r}")
+    return v if v > eps else eps
+
+
 def _model_name(dsge_basis: str, dsge_order: int, dsge_variant: str = 'A',
                 unet_width: int = 16) -> str:
     width_tag = f"_w{unet_width}" if unet_width != 16 else ""
@@ -82,9 +97,36 @@ class HybridUnetTrainer:
         device: str | None = None,
         data_fraction: float = 1.0,
         output_dir=None,
+        loss_name: str | None = None,
+        robust_beta: float = 0.02,
+        huber_delta: float = 1.0,
+        charbonnier_eps: float = 1e-3,
+        mask_type: str = "ratio",
+        dsge_fit_target: str = "signal",
+        dsge_snr_bins: int = 0,
+        dsge_norm_method: str = "p99",
     ):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
+        self.loss_name = loss_name
+        self.robust_beta = robust_beta
+        self.huber_delta = huber_delta
+        self.charbonnier_eps = charbonnier_eps
+        assert mask_type in ("ratio", "additive"), f"mask_type must be 'ratio' or 'additive'"
+        self.mask_type = mask_type
+        assert dsge_fit_target in ("signal", "noise", "n2n"), \
+            f"dsge_fit_target must be 'signal', 'noise', or 'n2n', got {dsge_fit_target!r}"
+        self.dsge_fit_target = dsge_fit_target
+        assert dsge_snr_bins >= 0, f"dsge_snr_bins must be ≥0, got {dsge_snr_bins}"
+        self.dsge_snr_bins = int(dsge_snr_bins)
+        assert dsge_norm_method in ("p99", "mad"), \
+            f"dsge_norm_method must be 'p99' or 'mad', got {dsge_norm_method!r}"
+        self.dsge_norm_method = dsge_norm_method
+        if self.dsge_snr_bins > 0 and dsge_fit_target != "signal":
+            raise ValueError(
+                "dsge_snr_bins > 0 requires dsge_fit_target='signal' "
+                "(SNR buckets are defined by signal/noise ratio, not noise-only fit)"
+            )
         self.dsge_order = dsge_order
         self.unet_width = unet_width
         self.dsge_variant = dsge_variant.upper()
@@ -140,19 +182,55 @@ class HybridUnetTrainer:
             print(f"[W&B] Logging disabled ({reason})")
 
         self._raw_noisy, self._raw_clean, self.input_shape, \
-            self._train_indices = self._load_raw_data()
+            self._train_indices, self._snr_values = self._load_raw_data()
 
         train_clean = self._raw_clean[self._train_indices]
         train_noisy = self._raw_noisy[self._train_indices]
 
-        print(f"[Info] Fitting DSGEFeatureExtractor on {len(train_clean)} train samples…")
         self.dsge = DSGEFeatureExtractor(
             basis_type=dsge_basis,
             powers=self.dsge_powers,
             tikhonov_lambda=tikhonov_lambda,
             stft_params={'nperseg': nperseg, 'noverlap': noverlap, 'fs': fs},
         )
-        self.dsge.fit(train_clean, train_noisy)
+        if self.dsge_fit_target == "signal":
+            if self.dsge_snr_bins > 0:
+                if self._snr_values is None:
+                    raise FileNotFoundError(
+                        f"dsge_snr_bins > 0 requires snr_values.npy in dataset"
+                    )
+                train_snr = self._snr_values[self._train_indices]
+                print(f"[Info] Fitting DSGE class-specific ({self.dsge_snr_bins} buckets) "
+                      f"on {len(train_clean)} train samples, "
+                      f"SNR range [{train_snr.min():+.2f}, {train_snr.max():+.2f}] dB…")
+                self.dsge.fit_class_specific(
+                    train_clean, train_noisy, train_snr, n_bins=self.dsge_snr_bins
+                )
+            else:
+                print(f"[Info] Fitting DSGE (target=clean, input=noisy) on {len(train_clean)} train samples…")
+                self.dsge.fit(train_clean, train_noisy)
+        else:
+            # Load noise-only samples (noise = noisy - clean, pre-computed on disk)
+            noise_path = self.dataset_path / "train" / f"{self.noise_type}_noise_only.npy"
+            if not noise_path.exists():
+                raise FileNotFoundError(
+                    f"noise-only file required for dsge_fit_target='{self.dsge_fit_target}': {noise_path}"
+                )
+            noise_full = np.load(noise_path)
+            if self.data_fraction < 1.0:
+                n = max(1, int(len(noise_full) * self.data_fraction))
+                noise_full = noise_full[:n]
+            noise_train = noise_full[self._train_indices]
+            if self.dsge_fit_target == "noise":
+                print(f"[Info] Fitting DSGE (target=noise, input=noise) on {len(noise_train)} noise samples…")
+                self.dsge.fit(noise_train, noise_train)
+            else:  # n2n
+                # Noise2Noise: shuffle target to pair independent realizations.
+                rng = np.random.default_rng(random_state)
+                shuffle_idx = rng.permutation(len(noise_train))
+                noise_target = noise_train[shuffle_idx]
+                print(f"[Info] Fitting DSGE (target=noise_B, input=noise_A shuffled) on {len(noise_train)} pairs…")
+                self.dsge.fit(noise_target, noise_train)
         self.dsge.check_generating_element_norm()
         print(f"[Info] DSGE ready: {self.dsge}")
 
@@ -170,10 +248,11 @@ class HybridUnetTrainer:
             input_shape=self.input_shape,
             dsge_order=dsge_channels,
             base_channels=self.unet_width,
+            mask_type=self.mask_type,
         ).to(self.device)
         print(f"[Info] Model params: {self.model.param_count():,} "
               f"(variant {self.dsge_variant}, {1 + dsge_channels} in_ch, "
-              f"width={self.unet_width})")
+              f"width={self.unet_width}, mask={self.mask_type})")
 
     # ── STFT helpers (GPU-batched, no scipy) ──────────────────────────────────
 
@@ -197,12 +276,21 @@ class HybridUnetTrainer:
     # ── data ──────────────────────────────────────────────────────────────────
 
     def _load_raw_data(self):
-        """Load raw signals, compute split indices, determine STFT shape."""
+        """Load raw signals, compute split indices, determine STFT shape.
+
+        Also loads snr_values.npy if present (used by H4 SNR-bucket routing).
+        Returns snr_values as None when the file does not exist.
+        """
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
+        snr_path = self.dataset_path / "train" / "snr_values.npy"
+        snr_values = np.load(snr_path) if snr_path.exists() else None
+
         if self.data_fraction < 1.0:
             n = max(1, int(len(noisy) * self.data_fraction))
             noisy, clean = noisy[:n], clean[:n]
+            if snr_values is not None:
+                snr_values = snr_values[:n]
         assert noisy.shape[1] == self.signal_len, \
             f"Signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
 
@@ -218,7 +306,7 @@ class HybridUnetTrainer:
         indices = torch.randperm(total, generator=g).tolist()
         train_indices = indices[:train_len]
 
-        return noisy, clean, input_shape, train_indices
+        return noisy, clean, input_shape, train_indices, snr_values
 
     def _precompute_and_build_loaders(self):
         """Precompute DSGE channels + clean_mag for all samples after DSGE is fitted.
@@ -244,24 +332,27 @@ class HybridUnetTrainer:
         all_clean_mag = torch.cat(clean_mag_list)  # [N, 1, F, T']
 
         # Precompute DSGE channels per signal
+        # For H4 class-specific fit, pass per-signal SNR for bucket routing
+        snr_arr = self._snr_values if self.dsge_snr_bins > 0 else None
         all_channels = []
         for i in tqdm(range(total), desc=f"  DSGE-v{self.dsge_variant}", unit="sig"):
             s = noisy[i]
+            snr_i = float(snr_arr[i]) if snr_arr is not None else None
             # Noisy STFT magnitude (always channel 0)
             stft_mag = self._stft_batch(
                 torch.tensor(s[np.newaxis], dtype=torch.float32)
             )[0].abs().numpy()  # [F, T']
-            stft_ref = _p99(stft_mag)
+            stft_ref = _robust_scale(stft_mag, self.dsge_norm_method)
 
-            # DSGE channels (variant-dependent)
+            # DSGE channels (variant-dependent, SNR-routed if class-specific)
             if self.dsge_variant == 'A':
-                dsge_ch = self.dsge.compute_dsge_channels_A(s)  # [2, F, T']
+                dsge_ch = self.dsge.compute_dsge_channels_A(s, snr_db=snr_i)
             else:
-                dsge_ch = self.dsge.compute_dsge_channels_B(s)  # [1+S, F, T']
+                dsge_ch = self.dsge.compute_dsge_channels_B(s, snr_db=snr_i)
 
             # Normalize DSGE channels to match noisy STFT scale
             for j in range(dsge_ch.shape[0]):
-                ref = _p99(dsge_ch[j])
+                ref = _robust_scale(dsge_ch[j], self.dsge_norm_method)
                 dsge_ch[j] *= (stft_ref / ref)
 
             all_channels.append(
@@ -304,7 +395,7 @@ class HybridUnetTrainer:
         all_channels = []
         for i, s in enumerate(signal_batch):
             stft_mag = stft_mags[i]                             # [F, T']
-            stft_ref = _p99(stft_mag)
+            stft_ref = _robust_scale(stft_mag, self.dsge_norm_method)
 
             if self.dsge_variant == 'A':
                 dsge_ch = self.dsge.compute_dsge_channels_A(s)  # [2, F, T']
@@ -312,7 +403,7 @@ class HybridUnetTrainer:
                 dsge_ch = self.dsge.compute_dsge_channels_B(s)  # [1+S, F, T']
 
             for j in range(dsge_ch.shape[0]):
-                ref = _p99(dsge_ch[j])
+                ref = _robust_scale(dsge_ch[j], self.dsge_norm_method)
                 dsge_ch[j] *= (stft_ref / ref)
 
             all_channels.append(
@@ -333,13 +424,23 @@ class HybridUnetTrainer:
         """[N, T] → [N, T]"""
         return self._denoise_batch(noisy)
 
+    def _apply_mask(self, model_out: torch.Tensor, noisy_mag: torch.Tensor) -> torch.Tensor:
+        """Combine raw model output with noisy magnitude per mask_type.
+
+        ratio:    out = sigmoid_mask * noisy_mag          (shape-preserving)
+        additive: out = clamp(noisy_mag + residual, ≥0)   (nonneg magnitude)
+        """
+        if self.mask_type == "ratio":
+            return model_out * noisy_mag
+        return torch.clamp(noisy_mag + model_out, min=0.0)
+
     def _denoise_batch(self, signal_batch: np.ndarray) -> np.ndarray:
         x_t = torch.tensor(signal_batch, dtype=torch.float32, device=self.device)
         spec = self._stft_batch(x_t)                          # [B, F, T'] complex
         x_ch = self._batch_to_channels(signal_batch)          # [B, C, F, T']
         self.model.eval()
         with torch.no_grad():
-            out_mag = self.model(x_ch).squeeze(1) * x_ch[:, 0, :, :]  # [B, F, T']
+            out_mag = self._apply_mask(self.model(x_ch), x_ch[:, 0:1, :, :]).squeeze(1)
         phase = spec / (spec.abs() + 1e-8)
         out_spec = out_mag * phase
         return self._istft_batch(out_spec).cpu().numpy()
@@ -347,10 +448,29 @@ class HybridUnetTrainer:
     # ── validation ────────────────────────────────────────────────────────────
 
     def _compute_val_snr(self) -> float:
+        """Compute time-domain SNR on val set using precomputed DSGE channels.
+
+        Avoids _batch_to_channels() recompute so that H4 SNR-bucket routing
+        (baked into precomputed x4 via oracle snr_values) is respected during
+        validation.
+        """
         all_true, all_pred = [], []
-        for _x4, _cm, noisy_raw, clean_raw in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
-            all_pred.append(self.denoise_numpy(noisy_raw.numpy()))
-            all_true.append(clean_raw.numpy())
+        self.model.eval()
+        with torch.no_grad():
+            for x4, _cm, noisy_raw, clean_raw in tqdm(
+                self.val_loader, desc="  val SNR", leave=False, unit="batch"
+            ):
+                x4_d = x4.to(self.device)
+                noisy_t = noisy_raw.to(self.device)
+                spec = self._stft_batch(noisy_t)                       # [B, F, T']
+                out_mag = self._apply_mask(
+                    self.model(x4_d), x4_d[:, 0:1, :, :]
+                ).squeeze(1)
+                phase = spec / (spec.abs() + 1e-8)
+                out_spec = out_mag * phase
+                denoised = self._istft_batch(out_spec).cpu().numpy()
+                all_pred.append(denoised)
+                all_true.append(clean_raw.numpy())
         return float(SignalToNoiseRatio.calculate(
             np.concatenate(all_true), np.concatenate(all_pred)
         ))
@@ -363,7 +483,7 @@ class HybridUnetTrainer:
             for x4, clean_mag, _, _ in tqdm(loader, desc="  val loss", leave=False, unit="batch"):
                 x4 = x4.to(self.device)
                 clean_mag = clean_mag.to(self.device)
-                out = self.model(x4) * x4[:, 0:1, :, :]
+                out = self._apply_mask(self.model(x4), x4[:, 0:1, :, :])
                 total_loss += loss_fn(out, clean_mag).item()
                 all_true.append(clean_mag.cpu().numpy())
                 all_pred.append(out.cpu().numpy())
@@ -379,7 +499,13 @@ class HybridUnetTrainer:
 
     def train(self) -> dict:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = select_loss(self.noise_type)
+        loss_fn = select_loss(
+            self.noise_type,
+            loss_name=self.loss_name,
+            robust_beta=self.robust_beta,
+            huber_delta=self.huber_delta,
+            charbonnier_eps=self.charbonnier_eps,
+        )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', patience=3, factor=0.5, threshold=0.01
         )
@@ -397,14 +523,30 @@ class HybridUnetTrainer:
             reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
+            mask_stats_sum = torch.zeros(3, device=self.device)  # [sum, sum_sq, count]
+            mask_min, mask_max = float("inf"), float("-inf")
             for x4, clean_mag, _, _ in pbar:
                 x4 = x4.to(self.device)
                 clean_mag = clean_mag.to(self.device)
-                out = self.model(x4) * x4[:, 0:1, :, :]
+                raw = self.model(x4)
+                out = self._apply_mask(raw, x4[:, 0:1, :, :])
                 loss = loss_fn(out, clean_mag)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
+                with torch.no_grad():
+                    mask_stats_sum[0] += raw.sum()
+                    mask_stats_sum[1] += (raw * raw).sum()
+                    mask_stats_sum[2] += raw.numel()
+                    mask_min = min(mask_min, float(raw.min()))
+                    mask_max = max(mask_max, float(raw.max()))
+            n = float(mask_stats_sum[2])
+            mask_mean = float(mask_stats_sum[0]) / max(n, 1)
+            mask_var = float(mask_stats_sum[1]) / max(n, 1) - mask_mean ** 2
+            self._last_mask_stats = {
+                "min": mask_min, "max": mask_max,
+                "mean": mask_mean, "std": mask_var ** 0.5,
+            }
 
             from train.device_utils import format_vram_str
             vram_str = format_vram_str(self.device)
@@ -424,10 +566,14 @@ class HybridUnetTrainer:
                     **{f'val/{k.lower()}': v for k, v in val_metrics.items()},
                 }, step=epoch)
 
+            ms = self._last_mask_stats
+            mask_tag = (f" | mask[{self.mask_type}]: "
+                        f"min={ms['min']:+.2f} max={ms['max']:+.2f} "
+                        f"μ={ms['mean']:+.3f} σ={ms['std']:.3f}")
             print(f"Epoch {epoch:02d}/{self.epochs} | "
                   f"train={total_loss / len(self.train_loader):.5f} | "
                   f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB | "
-                  f"lr={lr_now:.2e}{vram_str}")
+                  f"lr={lr_now:.2e}{vram_str}{mask_tag}")
 
             train_history.append(total_loss / len(self.train_loader))
             val_snr_history.append(val_snr)
