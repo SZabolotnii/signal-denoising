@@ -1,6 +1,6 @@
 # Стан дослідження — Signal Denoising with DSGE
 
-**Дата:** 2026-04-19 (оновлено 2026-04-24 — B2 main [4/6] complete, killed, §14 final)
+**Дата:** 2026-04-19 (оновлено 2026-04-24 — Phase B3 complete, §15)
 **Автор дослідження:** Сергій Заболотній
 **Датасет:** deep_space_polygauss_qpsk_bs1024_n400000_0310b7e7 + fpv_telemetry_polygauss_qpsk_bs1024_n100000_953c56e8
 **Сценарій:** Deep space (SNR -20..0 dB) + FPV (SNR -5..+18 dB), QPSK, 1024 samples @ 8192 Hz
@@ -1412,3 +1412,143 @@ baselines (+6..+7 dB). Wavelet не масштабується на low-SNR deep
 - `experiments/results/b2_crossover.md`
 - `experiments/results/b2_crossover.json`
 - `data_generation/datasets/<ds>/runs/*/comparison_report_20260424_153*.md/csv/json`
+
+---
+
+## §15. Phase B3 — zero-shot on RadioML 2018.01A (2026-04-24, ЗАВЕРШЕНО)
+
+**Контекст:** спершу вважалося неможливим через DeepSig server 502 та брак
+диску. Після ~20 GB cache cleanup + user-driven download 18 GB .tar.bz2 →
+extract 20 GB HDF5 (2,555,904 frames × 1024 samples, complex I/Q, 24
+modulations × 26 SNR levels) — адаптер `load_radioml2018.py` запущено двічі
+для створення scenario-matched subsets.
+
+### 15.1 Dataset adapter setup
+
+RadioML 2018 має SNR-grid крок 2 dB (−20..+30), тому test_snr_points виправлено
+до grid-aligned значень:
+
+| Subset | Train SNR range | Test SNR bins |
+|---|---|---|
+| `radioml2018_bpsk_qpsk_fpv` | ≤18 dB (train), ≥28 dB (clean proxy) | 0, 4, 8, 12, 16, 18 |
+| `radioml2018_bpsk_qpsk_deep_space` | ≤0 dB (train), ≥28 dB (clean proxy) | −20, −16, −12, −8, −4, 0 |
+
+FPV: 122,880 train / 40,960 test. Deep_space: 67,584 train / 22,528 test. Each
+bin = 500 samples. Clean-reference strategy: high-SNR (≥28 dB) proxy per-modulation
+(documented в `experiments/dataset_survey.md`).
+
+### 15.2 Zero-shot results (all pretrained models, mean SNR across bins)
+
+**FPV (n=3 seeds × 6 SNR bins), RadioML non-Gaussian test:**
+
+| Model | G-trained μ±σ (dB) | NG-trained μ±σ (dB) | Δ(NG−G) |
+|---|---:|---:|---:|
+| HybridDSGE_UNet | −0.31 ± 0.01 | **−0.04 ± 0.07** | +0.27 |
+| UnetAutoencoder | −0.46 ± 0.10 | **−0.24 ± 0.10** | +0.22 |
+| ResNetAutoencoder | −0.48 ± 0.23 | −0.50 ± 0.14 | −0.01 |
+| Wavelet | −1.59 ± 0.00 | −1.59 ± 0.00 | 0.00 |
+
+**deep_space (n=2 seeds × 6 SNR bins), RadioML non-Gaussian test:**
+
+| Model | G-trained μ±σ (dB) | NG-trained μ±σ (dB) | Δ(NG−G) |
+|---|---:|---:|---:|
+| HybridDSGE_UNet | −0.39 ± 0.25 | **−0.02 ± 0.00** | +0.38 |
+| UnetAutoencoder | −0.71 ± 0.17 | −0.75 ± 0.05 | −0.04 |
+| ResNetAutoencoder | −0.76 ± 0.17 | −0.61 ± 0.08 | +0.15 |
+| Wavelet | −0.49 ± 0.00 | −0.49 ± 0.00 | 0.00 |
+
+### 15.3 Ключові знахідки
+
+**1. Massive sim-to-real domain gap.** Усі моделі NEGATIVE SNR на real RadioML
+frames. Synthetic benchmark → real shift:
+
+| Model × scenario | Synthetic (+dB) | Real zero-shot (−dB) | Gap (dB) |
+|---|---:|---:|---:|
+| UNet FPV NG | +15.00 | −0.24 | **~15.2** |
+| UNet deep_space NG | +7.58 | −0.75 | **~8.3** |
+| ResNet FPV NG | +14.40 | −0.50 | ~14.9 |
+| Hybrid deep_space G | +0.19 | −0.39 | ~0.6 (low bar) |
+
+Synthetic polygauss noise model **не transferable** to real RadioML waveforms.
+Реальні RF frames мають channel effects (LO drift, frequency offsets, sampling
+rate differences, symbol boundaries), які не reflected у наш generation pipeline.
+
+**2. Hybrid NG identity = випадково optimal zero-shot.** Pristine identity
+mask (model output ≈ input) = "do no harm" baseline. Synthetic fail-mode
+(§11.3.3, §14.4.2) стає real-domain feature. Це honest observation, не claim
+що Hybrid краще — просто не псує те, що не розуміє.
+
+**3. NG-training partial generalization.** UNet FPV Δ(NG−G) = +0.22 dB —
+NG-trained model робить less damage zero-shot. На інших комбінаціях (UNet
+deep_space, ResNet обидва) — effect overlaps σ. Hypothesis:
+NG-training вчить "soft mask" під heavy-tail priors, що частково transferable до
+real RF outliers.
+
+**4. Wavelet scenario-specific competitiveness.** На deep_space real test
+Wavelet (−0.49) **beat** UNet NG (−0.75) і ResNet NG (−0.61). Classical
+grid-search denoiser може бути більш robust до domain shift ніж neural models,
+оскільки не memorizes signal-specific patterns. На FPV real Wavelet (−1.59)
+worst з great margin — domain shift tradeoff асиметричний.
+
+### 15.4 Implications для paper Discussion
+
+**Paper-relevant negative result.** "Synthetic-trained denoisers not
+zero-shot-transferable to real SDR" — honest finding для preprint. Підсилює
+мотивацію для **domain adaptation** / **fine-tuning on real data** як future
+work.
+
+**Ordering результатів для paper:**
+1. Strong positive: central hypothesis (NG > G) на synthetic — §§11, 14.
+2. Mixed: NG-training partial transfer до real (UNet FPV +0.22 dB) — §15.
+3. Strong negative: sim-to-real gap ~8-15 dB — §15.
+4. Failure taxonomy: Hybrid basin behavior (§10 A2 + §14.4.2).
+
+**Discussion-level insights:**
+- Hybrid NG identity — "graceful degradation" interpretation (not harmful
+  when domain shift invalidates learned priors).
+- Wavelet's scenario-specific competitiveness — argues для hybrid classical+NN
+  pipelines у practical deployments.
+
+### 15.5 Phase D — remaining writing tasks
+
+1. **Figures:** per-SNR curves (synthetic vs real side-by-side), domain gap
+  barplot, crossover heatmap — уже маємо дані для всіх, генератори існують
+  (`snr_curve.py`, B1 compare_report figures).
+2. **Paper skeleton:**
+   - Intro: radio denoising problem, NG channel reality.
+   - Methods: DSGE Hybrid, synthetic data generation, training protocol.
+   - Results A (synthetic): §§11, 14 — central hypothesis confirmed.
+   - Results B (DSGE failure): §§10, 13.3, 14.4.2 — failure taxonomy.
+   - Results C (sim-to-real): §15 — domain gap + partial transfer.
+   - Discussion: §15.4 items.
+3. **Supplementary:** §10 A2 hypothesis tests, §13.9 retractions
+   (методологічна прозорість).
+
+### 15.6 Compute final total
+
+| Фаза | Год |
+|---|---:|
+| Data generation | 4 |
+| A1 infra | 5 |
+| A2 H1–H6 | 21 |
+| B1 FPV main | 13.5 |
+| B2 sanity | 6.3 |
+| B2 main (4/6) | 30.2 |
+| B3 (adapter + 10 evals) | 0.3 |
+| **Phase B total** | **80.3** |
+| Budget | 72 |
+| Overshoot | **+8.3 h** |
+
+B3 дуже дешевий (adapter 2×~5 хв, evals 10×~4 сек) — не впливає на overshoot
+суттєво. Phase C (cross-eval + aggregators) fully reused existing tooling.
+
+### 15.7 Артефакти
+
+- `experiments/b3_real_sdr_zeroshot.py` — scaffold з JSON fix.
+- `experiments/b3_run_all.sh` — batch runner (10 invocations).
+- `analysis/aggregate_b3.py` — cross-seed aggregator.
+- `experiments/results/b3_aggregate.md/.json` — консолідовані таблиці.
+- 10× `experiments/results/b3_zeroshot_run_*.md/.json` — per-run per-SNR.
+- Adapted datasets:
+  `data_generation/datasets/radioml2018_bpsk_qpsk_{fpv,deep_space}/` (self-
+  contained, ~1-2 GB total).

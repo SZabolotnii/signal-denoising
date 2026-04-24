@@ -111,13 +111,25 @@ def main():
     json_path = args.out_dir / f"b3_zeroshot_{b1_run.name}_{real_ds.name[:24]}_{ts}.json"
     md_path = json_path.with_suffix(".md")
 
+    def _jsonify(o):
+        import numpy as np
+        if isinstance(o, dict):
+            return {k: _jsonify(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [_jsonify(x) for x in o]
+        if isinstance(o, (np.floating, np.integer)):
+            return float(o)
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        return o
+
     payload = {
         "b1_run": str(b1_run),
         "real_dataset": str(real_ds),
         "test_noise": args.test_noise,
         "nperseg": args.nperseg,
         "timestamp": ts,
-        "results": results,
+        "results": _jsonify(results),
     }
     with open(json_path, "w") as f:
         json.dump(payload, f, indent=2)
