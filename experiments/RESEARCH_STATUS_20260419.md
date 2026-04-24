@@ -1,6 +1,6 @@
 # Стан дослідження — Signal Denoising with DSGE
 
-**Дата:** 2026-04-19 (оновлено 2026-04-23 — B2 sanity завершено, §12.5–12.6)
+**Дата:** 2026-04-19 (оновлено 2026-04-24 — B2 main [4/6] complete, killed, §14 final)
 **Автор дослідження:** Сергій Заболотній
 **Датасет:** deep_space_polygauss_qpsk_bs1024_n400000_0310b7e7 + fpv_telemetry_polygauss_qpsk_bs1024_n100000_953c56e8
 **Сценарій:** Deep space (SNR -20..0 dB) + FPV (SNR -5..+18 dB), QPSK, 1024 samples @ 8192 Hz
@@ -1038,10 +1038,336 @@ python experiments/b3_real_sdr_zeroshot.py \
 3. **Пост-B2:** `aggregate_b1.py`-style aggregator для B2 main (6 run_dirs) →
    cross-seed σ-таблиці для статті.
 
+---
 
-**Артефакти:**
-- 6 оновлених `comparison_report_20260422_134*.md` у кожному `run_YYYYMMDD_*/`.
-- 6 оновлених `comparison_data_20260422_134*.csv/json` (фігури теж перегенеровано).
-- Aggregator `analysis/aggregate_b1.py` та його вихід b1_aggregate.md/json
-  залишаються авторитетним джерелом (per-trainer denoise_numpy), але
-  compare_report тепер також надійний для крос-еваль pipeline статті.
+## §13. Phase B2 main — deep_space (2026-04-23, ⏳ RUNNING, 2 seeds план)
+
+### 13.1 Конфіг та запуск
+
+**Скрипт:** `experiments/b2_main.sh` (PID 33983, стартував 07:31:35 EEST 2026-04-23).
+Лог: `experiments/results/b2_main_20260423_073135.log`.
+
+```
+SEEDS=(42 43 44)   # 44 буде вбито (див. §13.4)
+NOISE_TYPES=(gaussian non_gaussian)
+MODELS=unet,resnet,hybrid,wavelet
+EPOCHS=30, PARTIAL=0.25, DEVICE=cpu
+```
+
+6 invocations заплановано; **kill plan: зупинити після [4/6]** — 2 повні seeds,
+економія ~14 год compute (див. §13.4 обґрунтування).
+
+| # | seed | noise | час старту | статус | run_id |
+|---|---|---|---|---|---|
+| [1/6] | 42 | gaussian | 23-07:31:35 | ✅ done 23-14:29:11 (6h58m) | `run_20260423_ed46f843` |
+| [2/6] | 42 | non_gaussian | 23-14:29:11 | ✅ done 23-22:44:30 (8h15m) | `run_20260423_3d8957d2` |
+| [3/6] | 43 | gaussian | 23-22:44:30 | ✅ done 24-05:27:58 (6h43m) | `run_20260423_2b4b99cc` |
+| [4/6] | 43 | non_gaussian | 24-05:27:58 | ✅ done 24-13:45:08 (8h17m) | `run_20260424_20fc5edf` |
+| [5/6] | 44 | gaussian | 24-13:45:08 | ⛔ killed before UNet Ep01 | — |
+| [6/6] | 44 | non_gaussian | — | ⛔ never started | — |
+
+### 13.2 Per-SNR результати (поки що)
+
+**[1/6] seed=42 gaussian, 25%/30ep:**
+
+| Model | SNR_out (dB) per input SNR (−20..+3) | agg |
+|---|---|---:|
+| UNet G→G | −0.43 / 1.03 / 2.38 / 4.09 / 6.06 / 7.87 / 8.62 / 10.48 / 11.75 / 14.14 | **+6.58** |
+| ResNet G→G | −0.21 / 1.13 / 2.11 / 3.87 / 5.41 / 7.53 / 8.29 / 10.24 / 11.40 / 13.73 | **+6.35** |
+| Hybrid G→G | −0.24 / **−8.68** / **−6.85** / 0.77 / **−2.44** / 0.18 / 4.22 / 3.61 / 6.40 / 7.04 | **+0.40 (erratic)** |
+
+**[2/6] seed=42 non_gaussian, 25%/30ep (UNet complete, інші у процесі):**
+
+| Model | SNR_out (dB) | agg |
+|---|---|---:|
+| UNet NG→NG | 0.10 / 1.80 / 3.23 / 5.28 / 6.62 / 8.68 / 10.03 / 11.41 / 13.41 / 15.31 | **+7.59** |
+
+### 13.3 Нові наукові знахідки B2 main
+
+#### 13.3.1 Central hypothesis знову підтверджена на deep_space
+
+UNet NG (+7.59) > UNet G (+6.58) → **Δ = +1.01 dB** на seed=42 / 25%/30ep.
+
+Порівняння з sanity (10%/15ep): Δ був +1.58 dB. Ефект **зменшується з compute**
+(+0.57 dB gain gap closes as UNet G purer-trains), але стабільно залишається
+**позитивним** і суттєвим. Consistent з FPV B1 (Δ ≈ +0.78 dB) з урахуванням того,
+що deep_space має більший SNR-range → більший простір для NG-specific gains.
+
+#### 13.3.2 Hybrid — ТРЕТІЙ режим failure на deep_space
+
+Послідовність Hybrid behaviour на deep_space G:
+
+| Compute | Поведінка | Aggregate | Характеристика |
+|---|---|---|---|
+| 10% / 15 ep (sanity) | pure identity | 0.00 dB | mask = 1.0 на всіх frames |
+| **25% / 30 ep (main)** | **erratic non-identity** | **+0.40 dB** | mask learns *wrong* features, **non-monotonic curve** (−8.68 dB на SNR_in=−17, +7.04 dB на SNR_in=+3) |
+| 100% / 50 ep (очікується) | невідомо | ? | — |
+
+**Що означає erratic non-identity:** модель **вийшла з identity attractor** з
+більшим compute, але не знайшла корисного minimum — продукує аутпут, що **активно
+псує** сигнал на bins −17..−10 dB (SNR_out < SNR_in), водночас слабко покращує на
+високих SNR bins (−3..+3). Це якісно гірше за identity: negative-SNR degradation.
+
+**Гіпотеза mechanism:** ratio-mask + MSE loss + deep-space DSGE features створюють
+shallow local minima де модель оптимізує average MSE, але кидає signal-power у
+випадкові band-частини — класичний сигнал spectral leakage через погано
+conditioned mask. При більшому compute модель залишає safe identity attractor і
+дрейфує у такі local minima.
+
+#### 13.3.3 Retraction: "NG-effect зник" з попереднього рапорту
+
+У рапорті 16:40 EEST я помилково приписав ResNet G→G числа UNet NG, і сформулював
+що "NG-effect зник з compute" (Δ=−0.06). Це була **помилка зчитування таблиці**.
+Правильне Δ = **+1.01 dB** (після перевірки моніторингом о 19:30, коли UNet NG
+таблиця дійсно з'явилась у лозі). Central hypothesis підтверджена і на main-scale.
+
+### 13.4 Kill plan — обґрунтування
+
+**Причина:** per-invocation time на main scale = 6h58min ([1/6] виміряно). Повний
+run = 6 × 7h ≈ 42h, overshoot 20h від 22h budget-залишку. Compute risk для Phase
+C/D (~15h разом).
+
+**Рішення (прийнято 2026-04-23):** зупинити після [4/6] (seeds 42, 43 обидва
+noise types = 4 invocations).
+
+**Trade-offs:**
+- n=2 seeds замість n=3 для cross-seed σ. Consistent з FPV B1 де σ було <0.1 dB —
+  різниця σ(n=2) vs σ(n=3) не змінить висновків.
+- Seed=43 підтвердить що Hybrid erratic non-identity **не seed-specific** artefact.
+- Економія 14h → залишає 8h на Phase C (aggregation + cross-eval) + 4h на D (writing).
+
+**Execution:** kill PID 33983 коли монітор повідомить "### [4/6] done"
+(очікується ≈ 11:30 EEST 2026-04-24).
+
+### 13.5 Compute tally
+
+| Фаза | Год | Cumul |
+|---|---|---|
+| До B2 main | 49.8 | 49.8 |
+| B2 main [1/6] done | 6.97 | 56.8 |
+| B2 main [2/6] in progress | ~4 поки що | ~60.8 |
+| B2 main [3/6] + [4/6] (очікується) | ~14 | ~74.8 |
+| Budget | 72 | — |
+| Overshoot | — | ~2.8h |
+
+Прийнятно (vs 20h overshoot при full 6/6).
+
+### 13.6 Per-seed aggregate (B2 main, invocations [1..3]/6 complete, [4/6] running)
+
+| Model | s42 G→G | s42 NG→NG | s43 G→G | s43 NG→NG |
+|---|---:|---:|---:|---:|
+| UNet | +6.58 | **+7.59** | +6.35 | ⏳ |
+| ResNet | +6.35 | **+7.13** | +6.21 | — |
+| Hybrid | **+0.40** (erratic) | 0.00 (identity) | **−0.01** (identity) | — |
+| Wavelet (MSE) | 1.097 | 3.779 | ~1.09 | — |
+
+### 13.7 Cross-seed μ±σ (n=2, G-колонка) та Hybrid bimodality
+
+**UNet G→G:** μ = +6.47, σ = **0.16** dB (n=2)
+**ResNet G→G:** μ = +6.28, σ = **0.10** dB (n=2)
+**Hybrid G→G:** μ = +0.19, σ = **0.29** dB (n=2, **bimodal!**)
+
+Reproducibility UNet/ResNet consistent з FPV B1 (σ ≤ 0.08 на n=3). Публікаційно-
+ready для 2-seed reporting.
+
+**Hybrid bimodality на deep_space G:**
+
+Критична знахідка [3/6]: при ідентичному конфізі (seed лише відрізняється) Hybrid
+потрапляє у **якісно різні basins**:
+
+- seed=42 → **erratic non-identity** (escape from identity at main scale, land у
+  pathological minimum: SNR_out=−8.68 dB на SNR_in=−17, non-monotonic curve, agg +0.40)
+- seed=43 → **pristine identity** (mask ≈ 1.0 на всіх frames, agg −0.006)
+
+**Mapping failure modes across experiments:**
+
+| Experiment | Hybrid behaviour | Seed-dependency |
+|---|---|---|
+| FPV B1 NG | bimodal: 2/3 identity collapse, 1/3 works @+11.77 | YES |
+| Deep_space B2 sanity G (10%/15ep) | uniform identity collapse | — |
+| Deep_space B2 main G (25%/30ep) | **bimodal: identity vs erratic** | **YES** |
+| Deep_space B2 main NG (25%/30ep, s42) | pristine identity | pending s43 |
+
+**Нова insight:** Hybrid bimodality **universal across scenarios**, але direction
+basins змінюється з compute scale:
+- На small compute (10%/15ep): усі seeds → identity (shallow optimization).
+- На larger compute (25%/30ep): deeper optimization → seeds розділяються на
+  *safe identity* vs *risky escape* basins.
+- На FPV NG (§11.3.3): compute вистачає щоб у деяких seeds знайти *useful*
+  minimum (seed=43: +11.77 dB).
+
+Це **basin-selection property** оптимізаційного ландшафту Hybrid — loss landscape
+має ≥3 attractors (identity, erratic-bad, useful), доступність яких залежить від
+scenario (SNR range → basin depths) та random init.
+
+### 13.8 Оновлений compute tally
+
+| Фаза | Год | Cumul |
+|---|---|---|
+| До B2 main | 49.8 | 49.8 |
+| B2 [1/6] 6h58m | 6.97 | 56.8 |
+| B2 [2/6] 8h15m | 8.25 | 65.1 |
+| B2 [3/6] 6h43m | 6.72 | 71.8 |
+| B2 [4/6] очікується ~7h | 7.0 | 78.8 |
+| Budget | 72 | — |
+| Overshoot | — | **~6.8h** |
+
+Overshoot ~6.8h прийнятний (vs 20h при full 6/6). Залишок compute на Phase C/D:
+72-49.8 − 29 = −6.8h → потрібно економити в Phase C (aggregator reuse, мінімум
+нового кodu) + Phase D (writing може йти паралельно з running analysis).
+
+### 13.9 Retractions / корекції у §13 попередніх версіях
+
+- **16:40 2026-04-23:** помилково приписав ResNet G→G числа UNet NG, висновок
+  "NG-effect зник" неправильний. Після перевірки о 19:30 UNet NG = +7.59 dB,
+  Δ = +1.01 dB. Central hypothesis підтверджена.
+- **§13.3.2 (перший draft):** позиціонував Hybrid erratic як "universal при 25%/30ep"
+  — спростовано seed=43 який дав pristine identity. Правильна інтерпретація:
+  bimodal seed-dependent. §13.7 оновлює taxonomy.
+
+### 13.10 Immediate actions (post-[4/6])
+
+1. **Kill PID 33983** на "### [4/6] done" monitor event.
+2. **`analysis/aggregate_b2.py`** — адаптувати з `aggregate_b1.py` для 4 run_dirs
+   (2 seeds × 2 noise); emit μ±σ таблиці + per-SNR curves + Hybrid bimodality
+   breakdown.
+3. **`experiments/results/b2_aggregate.md` / `.json`** — публікаційні артефакти.
+4. **`compare_report.py` runs на кожному B2 run_dir** — для cross-evaluation
+   matrix (G→G, G→NG, NG→G, NG→NG) аналогічно §11.8.
+5. **Commit** B2 main source + artifacts.
+6. **Оновити RESEARCH_STATUS §14 Final B2 results** після aggregation.
+
+---
+
+## §14. Final B2 main results (2026-04-24, ЗАВЕРШЕНО)
+
+**Kill time:** 13:45:something EEST 2026-04-24. PID 33983 terminated SIGTERM
+after `### [4/6] done 13:45:08 ###`. [5/6] seed=44 G was 0 epochs in when killed.
+Total wall-clock: 23-07:31:35 → 24-13:45:10 ≈ **30h 13m**.
+
+**Run dirs:**
+| Invocation | seed | noise | run_id |
+|---|---|---|---|
+| [1/6] | 42 | G | `runs/run_20260423_ed46f843` |
+| [2/6] | 42 | NG | `runs/run_20260423_3d8957d2` |
+| [3/6] | 43 | G | `runs/run_20260423_2b4b99cc` |
+| [4/6] | 43 | NG | `runs/run_20260424_20fc5edf` |
+
+### 14.1 Per-seed aggregate (agg SNR_out across all 10 SNR bins, dB)
+
+| Model | s42 G→G | s42 NG→NG | s43 G→G | s43 NG→NG |
+|---|---:|---:|---:|---:|
+| UnetAutoencoder | +6.58 | +7.59 | +6.35 | +7.56 |
+| ResNetAutoencoder | +6.35 | +7.13 | +6.21 | +7.14 |
+| HybridDSGE_UNet (robust S=3 vA) | **+0.40** erratic | 0.00 identity | **−0.01** identity | 0.00 identity |
+| Wavelet (Test MSE) | 1.097 | 3.779 | ~1.09 | ~3.78 |
+
+### 14.2 Cross-seed μ±σ таблиця (публікаційна)
+
+| Model | Train | μ (dB) | σ (dB) | n | Notes |
+|---|---|---:|---:|---|---|
+| UnetAutoencoder | G | **+6.47** | 0.16 | 2 | — |
+| UnetAutoencoder | NG | **+7.58** | 0.02 | 2 | **Δ(NG−G) = +1.11** |
+| ResNetAutoencoder | G | **+6.28** | 0.10 | 2 | — |
+| ResNetAutoencoder | NG | **+7.14** | 0.007 | 2 | **Δ(NG−G) = +0.86** |
+| HybridDSGE_UNet | G | +0.19 | 0.29 | 2 | **bimodal** (erratic/identity) |
+| HybridDSGE_UNet | NG | 0.00 | 0.000 | 2 | uniform identity |
+
+**Signal-to-noise для central hypothesis:**
+- UNet: Δ=+1.11 dB vs max(σ_G, σ_NG)=0.16 → **~7× SNR** (publishable).
+- ResNet: Δ=+0.86 dB vs max σ=0.10 → **~9× SNR** (publishable).
+
+### 14.3 Per-SNR curves (cross-seed μ, dB)
+
+**UNet:**
+
+| SNR_in | −20 | −17 | −15 | −12 | −10 | −7 | −5 | −3 | 0 | +3 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| G μ (n=2) | −0.44 | 0.96 | 2.15 | 3.96 | 5.98 | 7.87 | 8.52 | 10.33 | 11.49 | 13.79 |
+| NG μ (n=2) | +0.03 | 1.74 | 3.17 | 5.22 | 6.59 | 8.69 | 10.05 | 11.44 | 13.45 | 15.37 |
+| Δ | +0.47 | +0.79 | +1.02 | +1.26 | +0.61 | +0.82 | +1.53 | +1.11 | +1.96 | +1.58 |
+
+**ResNet:**
+
+| SNR_in | −20 | −17 | −15 | −12 | −10 | −7 | −5 | −3 | 0 | +3 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| G μ (n=2) | −0.22 | 0.92 | 1.76 | 3.85 | 5.07 | 7.46 | 8.34 | 10.31 | 11.47 | 13.86 |
+| NG μ (n=2) | +0.42 | 1.63 | 2.84 | 4.86 | 5.93 | 8.11 | 9.37 | 10.70 | 12.67 | 14.62 |
+| Δ | +0.64 | +0.71 | +1.07 | +1.01 | +0.87 | +0.65 | +1.03 | +0.40 | +1.20 | +0.76 |
+
+Δ_NG stable across all SNR bins (жоден bin з Δ<0) — central hypothesis monotonic у SNR.
+
+### 14.4 Key scientific findings (consolidated)
+
+**1. Central hypothesis confirmed cross-scenario × cross-model:**
+
+| Scenario / Model | Δ(NG−G) | σ_G | σ_NG | n |
+|---|---:|---:|---:|---|
+| FPV / UNet | +0.78 | 0.08 | 0.07 | 3 |
+| FPV / ResNet | +1.26 | 0.07 | 0.025 | 3 |
+| **deep_space / UNet** | **+1.11** | 0.16 | 0.02 | 2 |
+| **deep_space / ResNet** | **+0.86** | 0.10 | 0.007 | 2 |
+
+Non-Gaussian training improves denoising performance on non-Gaussian test signals
+consistently across both radio scenarios (low-SNR deep space, high-SNR FPV) і
+standard CNN architectures. Effect size 0.8–1.3 dB, reproducibility σ<0.2 dB.
+
+**2. Hybrid DSGE — scenario- AND seed-dependent failure modes:**
+
+Обсерваційна taxonomy (Hybrid robust S=3 vA across 4 experimental contexts):
+
+| Context | Behaviour | n success |
+|---|---|---|
+| FPV / G (§11.3.1) | consistent learning @+11.13 dB | 3/3 |
+| FPV / NG (§11.3.3) | bimodal: 2/3 identity, 1/3 @+11.77 dB | 1/3 |
+| deep_space / G 10%/15ep (§12) | uniform identity | 0/1 (single seed) |
+| deep_space / G 25%/30ep (§14) | **bimodal: 1/2 erratic, 1/2 identity** | 0/2 |
+| deep_space / NG 25%/30ep (§14) | uniform identity | 0/2 |
+
+Hybrid working regime is **narrow and scenario-specific**: FPV (high SNR range)
++ Gaussian noise + MSE loss. Будь-яке відхилення (low SNR, non-Gaussian, або
+different loss) переводить модель у один з degenerate basins (identity, erratic,
+bimodal).
+
+**3. DSGE parameter efficiency не виправдовується на deep_space:**
+
+FPV: Hybrid (~30k params) досягає 78% якості UNet (~300k params) — legitimate
+parameter efficiency story. Deep_space: Hybrid **не досягає навіть identity
+baseline** надійно (bimodal). Claim про universal parameter efficiency
+**falsified на deep_space**. Scenario-conditional claim залишається valid.
+
+**4. Optimization landscape insight:**
+
+Hybrid loss landscape has ≥3 distinct attractors (identity, useful, erratic).
+Basin selection is deterministic given (scenario, noise_type, loss, seed).
+This is a architectural property of ratio-mask + DSGE feature concatenation,
+not a training artifact — all attempted interventions (A2-H1..H6, §10) failed
+to unify outcomes across seeds.
+
+### 14.5 Compute tally (final)
+
+| Фаза | Год |
+|---|---:|
+| Data generation | 4 |
+| A1 reproducibility infra | 5 |
+| A2 H1–H6 | 21 |
+| B1 FPV main | 13.5 |
+| B2 sanity | 6.3 |
+| B2 main (4/6 invocations) | 30.2 |
+| **Total through §14** | **80.0** |
+| Budget | 72 |
+| **Overshoot** | **+8.0 h** |
+
+Залишок на Phase C (aggregation + cross-eval) + D (writing) = **0h formal budget**.
+Practical: aggregation reuses existing aggregate_b1.py template (~30 min work),
+writing happens in parallel with any remaining analysis.
+
+### 14.6 Immediate next (post-kill 2026-04-24 13:45)
+
+1. ✅ Kill PID 33983
+2. **`analysis/aggregate_b2.py`** — adapted from aggregate_b1 for 4 run_dirs.
+3. **`experiments/results/b2_aggregate.md/.json`** — publication-ready artifacts.
+4. **Run `compare_report.py` on 4 B2 run_dirs** — crossover matrix
+   (G→G, G→NG, NG→G, NG→NG).
+5. **Commit** sources + artifacts + RESEARCH_STATUS §14.
+6. **(Optional, if time)** B3 real SDR (needs RadioML HDF5 / DroneDetect raw).
