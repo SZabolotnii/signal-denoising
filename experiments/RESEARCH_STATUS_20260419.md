@@ -1371,3 +1371,44 @@ writing happens in parallel with any remaining analysis.
    (G→G, G→NG, NG→G, NG→NG).
 5. **Commit** sources + artifacts + RESEARCH_STATUS §14.
 6. **(Optional, if time)** B3 real SDR (needs RadioML HDF5 / DroneDetect raw).
+
+### 14.7 Crossover matrix (2026-04-24 15:40, DONE)
+
+**Execution:** `compare_report.py` run on each of 4 B2 run_dirs (~3 min each,
+total ~12 min). Outputs: 4 updated `comparison_report_20260424_153*.md/csv/json`
+in each run_dir. Aggregator: `analysis/aggregate_b2_crossover.py` combines
+CSVs into `experiments/results/b2_crossover.md/.json`.
+
+**Results (μ±σ, n=2 seeds):**
+
+| Model | G→G | G→NG | NG→G | NG→NG |
+|---|---:|---:|---:|---:|
+| UNet | +6.47 ± 0.17 | +6.67 ± 0.22 | **+7.25** ± 0.02 | **+7.57** ± 0.02 |
+| ResNet | +6.28 ± 0.10 | +6.42 ± 0.16 | **+6.82** ± 0.00 | **+7.14** ± 0.00 |
+| Hybrid | +0.20 ± 0.29 | **−0.78** ± 1.08 | 0.00 ± 0.00 | 0.00 ± 0.00 |
+| Wavelet | −4.45 | −5.95 | −4.45 | −5.95 |
+
+**Ordering підтверджено (UNet/ResNet):** NG→NG > NG→G > G→NG > G→G.
+Це сильніший claim ніж оригінальна hypothesis — **NG-training дає gains на
+обох тестових типах** (не тільки NG test).
+
+**Δ-таблиця (UNet):**
+| Comparison | Δ (dB) | Інтерпретація |
+|---|---:|---|
+| NG→NG vs G→NG | +0.90 | classical hypothesis: NG train better on NG test |
+| NG→G vs G→G | **+0.77** | **new claim: NG train better on G test too** |
+| NG→NG vs G→G | +1.10 | "best-of-both-worlds" gain |
+
+**Hybrid negative claim:** G-trained Hybrid **шкодить** на NG test (G→NG =
+−0.78 dB); NG-trained Hybrid — trivial identity на обох тестах (0.00).
+Практична recommendation: не deploy Hybrid на deep_space.
+
+**Wavelet deterministic:** zero σ (той самий `db4/level=4/soft/symmetric`
+optimum з grid search), незалежно від training seed і noise_trained
+category. Класичний baseline −4.45 / −5.95 dB — **значно гірший** за NN
+baselines (+6..+7 dB). Wavelet не масштабується на low-SNR deep_space.
+
+**Артефакти:**
+- `experiments/results/b2_crossover.md`
+- `experiments/results/b2_crossover.json`
+- `data_generation/datasets/<ds>/runs/*/comparison_report_20260424_153*.md/csv/json`
