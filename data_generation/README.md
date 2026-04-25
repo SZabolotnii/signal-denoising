@@ -348,3 +348,24 @@ python data_generation/evaluate_dataset.py --help
 | `--grid_bins` | 20 | Роздільна здатність S-K сітки |
 | `--noise_type` | `non_gaussian` | Який файл аналізувати |
 | `--n_signals` | всі | Обмежити аналіз першими N сигналами |
+
+
+- Усі `*.npy` файли — float32, гігабайтні масштаби.
+    - Глобальний `.gitignore` виключає `data_generation/datasets/`.               
+    - Для відтворюваності зберігаємо **тільки `dataset_config.json`** як reference
+      (генерація детермінована за seed з `generation.py`).                        
+    - Для адаптованих RadioML — мінімальна підмножина:
+    `non_gaussian_noise_only.npy`
+      (~1-2 GB) достатня для B5-style повторних експериментів без re-extraction
+      HDF5.
+
+    ---
+
+    ## 6. Відповідні розділи RESEARCH_STATUS
+
+    - §11 — B1 FPV main (use FPV synthetic).
+    - §14 — B2 deep_space main (use deep_space synthetic).
+    - §15 — B3 zero-shot (use RadioML adapted subsets).
+    - `REAL_DATA_STATUS.md` §1-3 — B4 (failed), B5 (synth+real-noise mix).
+
+    ---
